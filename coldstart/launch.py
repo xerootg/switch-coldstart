@@ -2,9 +2,13 @@
 
     1. connect to sys-botbase, getVersion (hard failure if port 6000 is dead)
     2. screenshot + classify until HOME: dialog -> A, anything else -> HOME
-    3. DLEFT x dleft_presses, DRIGHT x tile, screenshot, A
-    4. user-select -> A
-    5. wait for the rig to answer a ping
+       (an application/hbmenu screen while the rig is silent is a deaf slot;
+       HOME suspends it)
+    3. DLEFT x dleft_presses (the suspended application, if any, is tile 0),
+       X: "Close software" prompt -> A closes it (works without twili)
+    4. DRIGHT x tile, screenshot, A
+    5. user-select -> A
+    6. wait for the rig to answer a ping
 
 Without references (or without Pillow, or when pixelPeek returns nothing) the
 screens cannot be told apart, so the sequence runs "blind": HOME, HOME, tile,
@@ -126,6 +130,9 @@ class Launcher:
             f"anything else -> click HOME (settle {L.settle_home_s:g} s)",
             "  (blind, without references: click HOME, click HOME)",
             f"click DLEFT x{L.dleft_presses} (settle {L.settle_dpad_s:g} s each)",
+            f"click X (settle {L.settle_dialog_s:g} s), screenshot; if close-prompt: click A "
+            f"(settle {L.settle_close_s:g} s) to close the suspended application, screenshot",
+            "  (blind: no X -- a suspended application cannot be closed safely without screenshots)",
             f"click DRIGHT x{tile} (settle {L.settle_dpad_s:g} s each)",
             "screenshot",
             f"click A (settle {L.settle_a_s:g} s), screenshot",
@@ -199,6 +206,9 @@ class Launcher:
                     break
                 if r.label == "home":
                     return
+                if step == 0 and r.label in ("game", "waiter"):
+                    self.log(f"an application ({r.label}) is in the foreground although the rig is "
+                             "silent: deaf slot; HOME suspends it, X/A close it")
                 if r.label == "dialog":
                     self._click("A", L.settle_dialog_s)
                 else:
@@ -221,6 +231,11 @@ class Launcher:
         self.log(f"select tile {tile}: DLEFT x{L.dleft_presses}, DRIGHT x{tile}")
         for _ in range(L.dleft_presses):
             self._click("DLEFT", L.settle_dpad_s, quiet=True)
+        if self.blind:
+            self.log("blind: not pressing X; a suspended application cannot be closed without "
+                     "screenshots (record references, including close-prompt)")
+        else:
+            self._close_suspended()
         for _ in range(tile):
             self._click("DRIGHT", L.settle_dpad_s, quiet=True)
         r = self.shot(f"tile-{tile}")
@@ -235,6 +250,31 @@ class Launcher:
             self.shot("after-user-select")
         elif r.label == "dialog":
             raise LaunchFailure(LAUNCH_FAILED, f"a dialog appeared after A on tile {tile}")
+
+    def _close_suspended(self) -> None:
+        """HOME menu, cursor on tile 0 (the most recent = the suspended
+        application, if any): X opens "Close software"; A confirms. With
+        nothing suspended X does nothing and HOME stays."""
+        L = self.L
+        self._click("X", L.settle_dialog_s)
+        r = self.shot("close-check")
+        if r.label == "home":
+            self.log("no suspended application")
+            return
+        if r.label != "close-prompt":
+            self._click("B", L.settle_dialog_s)
+            raise LaunchFailure(LAUNCH_FAILED, f"X on the HOME menu showed {r.label}, "
+                                f"not close-prompt or HOME ({r.summary()})")
+        self.log("an application is suspended while the rig is silent (deaf slot or hbmenu): closing it")
+        self._click("A", L.settle_close_s)
+        r = self.shot("after-close")
+        if r.label == "dialog":
+            self._click("A", L.settle_dialog_s)
+            r = self.shot("after-close-dialog")
+        if r.label != "home":
+            raise LaunchFailure(LAUNCH_FAILED, f"after closing the suspended application the screen "
+                                f"is {r.label}, not HOME ({r.summary()})")
+        self.log("suspended application closed")
 
     def _wait_rig(self, t0: float) -> LaunchResult:
         c = self.cfg

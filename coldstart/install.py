@@ -1,8 +1,10 @@
-"""Put sys-botbase on the SD card over FTP (sys-ftpd), and start it via twili.
+"""Put sys-botbase on the SD card over FTP (sys-ftpd); start it via twili as a fallback.
 
 Installing a third-party sysmodule is the owner's decision: ``install``
 prints its plan and does nothing unless ``--yes`` is given. ``boot2.flag``
-(start at every boot) is written only with ``--boot``.
+(start at every boot) is written only with ``--boot``; the normal path is
+``install --yes --boot`` followed by a reboot by the owner. ``start-sysmodule``
+(twili's ``launch``) only helps while twili still runs on the console.
 """
 from __future__ import annotations
 
@@ -83,8 +85,8 @@ def install(cfg, log, yes: bool, boot: bool, release: bool, ftp_factory=None) ->
     for u in ups:
         log(f"  {u.describe()}")
     if not boot:
-        log("  no boot2.flag: the sysmodule will NOT start at boot; start it with "
-            "`coldstart start-sysmodule` (or re-run with --boot once it has proven itself)")
+        log("  no boot2.flag: the sysmodule will NOT start at boot (the normal install is "
+            "--boot followed by a reboot; `coldstart start-sysmodule` is a twili-only fallback)")
     if not yes:
         log("dry run: nothing was sent. Re-run with --yes to do exactly the above.")
         return 0
@@ -109,7 +111,12 @@ def install(cfg, log, yes: bool, boot: bool, release: bool, ftp_factory=None) ->
     except (OSError, ftplib.Error, EOFError, InstallError) as e:
         log(f"install FAILED: {e}")
         return 1
-    log("installed. Next: `coldstart start-sysmodule` (no reboot needed), then `coldstart status`.")
+    if boot:
+        log("installed with boot2.flag. Next: reboot the console (sys-botbase listens ~20 s after "
+            "boot), then `coldstart status`.")
+    else:
+        log("installed without boot2.flag. Next: re-run with --boot and reboot, or, if twili still "
+            "runs, `coldstart start-sysmodule` as a one-off fallback.")
     return 0
 
 

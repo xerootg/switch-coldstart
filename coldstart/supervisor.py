@@ -3,7 +3,8 @@
 States (DESIGN.md has the diagram and the reasoning):
 
     WATCH      ping every poll_s; silent for silent_s -> RECOVER
-    RECOVER    one attempt: twili (terminate a deaf hbl), then launch
+    RECOVER    one attempt: twili if enabled (terminate a deaf hbl), then launch
+               (the launch itself closes a suspended app via HOME, X, A)
                ok -> WATCH; hard failure -> HUMAN; soft failure -> BACKOFF,
                or HUMAN after `attempts` attempts
     BACKOFF    keep pinging every poll_s until the next attempt is due
@@ -151,13 +152,15 @@ class Supervisor:
     def _check_slot(self) -> LaunchFailure | None:
         """Terminate a deaf hbl process. Returns a failure, or None to launch."""
         if self.twili is None:
-            self.log("twili: not configured; going on with the launch")
+            self.log("twili disabled: a deaf or suspended application is closed through the "
+                     "HOME menu (HOME, X, A) during the launch")
             return None
         tid = int(self.cfg.twili.hbl_title_id, 16)
         try:
             procs = self.twili.find(tid)
         except TwiliUnavailable as e:
-            self.log(f"twili unreachable ({e}); going on with the launch")
+            self.log(f"twili unreachable ({e}); going on with the launch, which closes a "
+                     "suspended application through the HOME menu")
             return None
         if not procs:
             self.log(f"twili: no process with title 0x{tid:016x}: the slot is dead")

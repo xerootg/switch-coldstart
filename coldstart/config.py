@@ -46,6 +46,10 @@ DEFAULTS: dict[str, dict] = {
         "ping_timeout_s": 1.0,
     },
     "twili": {
+        # twili is optional (it no longer runs on the console by default).
+        # Disabled or unreachable: a deaf/suspended application is closed
+        # through the HOME menu (HOME, X, A) during the launch instead.
+        "enabled": False,
         "twib": "twib",
         "twibd": "twibd",
         # Empty: start our own twibd with a socket in the run directory.
@@ -62,6 +66,8 @@ DEFAULTS: dict[str, dict] = {
         "settle_dpad_s": 0.4,
         "settle_a_s": 3.0,
         "settle_dialog_s": 2.0,
+        # after A on the HOME menu's "Close software" prompt
+        "settle_close_s": 4.0,
         "max_normalize_steps": 5,
         "wait_rig_s": 120.0,
         "rig_poll_s": 2.0,

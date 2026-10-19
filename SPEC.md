@@ -17,7 +17,9 @@ written as a proper small project: tests, docs, a clean CLI.
 - Nintendo Switch, firmware 20.2.0, Atmosphère 1.11.2. LAN address
   192.168.128.150 (configurable). Services on it today:
   - sys-ftpd on TCP 5000 (anonymous FTP, the SD card as `/`).
-  - twili's TCP bridge on 15152. The host tool `twib` talks to it through
+  - twili's TCP bridge on 15152 — **being removed (spec change
+    2026-10-19, see below); optional from now on.** The host tool `twib`
+    talks to it through
     `twibd`: `twibd --unix -P <sock>`, `twib -P <sock> connect-tcp <ip>`,
     then `twib -P <sock> ps` (a table: `Process ID | Result | Title ID |
     Process Name | MMU Flags`, ids in hex), `twib -P <sock> terminate
@@ -47,10 +49,31 @@ written as a proper small project: tests, docs, a clean CLI.
     (requires Atmosphère's `enable_am_debug_mode`, which this console has).
   - `getVersion` → the version string.
   - `configure` subcommands for key sleep/press durations.
-  The sysmodule can be started without a reboot through twili
-  (`twib launch 430000000000000B none`) once its files are on the card, so
-  its firmware compatibility is proven before any `boot2.flag` makes it
-  permanent. `reference/pad.py` is a working prototype client.
+  The normal install is the files plus `boot2.flag` and a reboot by the
+  owner. While twili still runs, the sysmodule can also be started without
+  a reboot (`twib launch 430000000000000B none`); that is a fallback only.
+  `reference/pad.py` is a working prototype client.
+
+### Spec change 2026-10-19: twili leaves the console
+
+The console's system memory pool has 5 MiB free; sys-botbase needs about
+5 MiB and twili holds 14 MiB. The owner approved migrating to sys-botbase:
+twili's boot flag is disabled and sys-botbase starts at boot. Consequences:
+
+- twili is optional: `twili.enabled = false` by default. When enabled and
+  reachable it may still be used for `ps`/`terminate`; when disabled or
+  unreachable, the supervisor uses the HOME-menu path below.
+- Without twili, "is a homebrew process alive?" is answered by the rig port
+  (silent) plus the screenshot (an application or hbmenu screen versus
+  HOME).
+- A deaf slot (process alive, rig port silent) is closed through
+  sys-botbase: HOME (the application is suspended and HOME shows), then X
+  (the HOME menu's "Close software" prompt for the suspended application),
+  then A to confirm, with a screenshot and classification after each step;
+  then the normal launch sequence. The classifier gains the reference name
+  `close-prompt`; the simulator gains that screen (HOME with a suspended
+  application, X → close-prompt, A → HOME with nothing suspended, B → back).
+- `coldstart start-sysmodule` (twili launch) is a fallback only.
 
 ## What the tool must do
 
@@ -61,10 +84,12 @@ A long-running loop on the host:
 1. Poll the rig (UDP ping) every few seconds. While it answers, do nothing
    but log a heartbeat (rate-limited).
 2. When it has not answered for `silent_s` (default 60 s):
-   - Ask twili whether a homebrew process (the hbl title, default program
-     id 01007ef00011e000, configurable) exists. If it does, the slot is
-     "deaf" (alive but not answering); terminate it with twili, then launch.
-     If twili itself is unreachable, note it and go on with the launch.
+   - If twili is enabled: ask it whether a homebrew process (the hbl title,
+     default program id 01007ef00011e000, configurable) exists. If it does,
+     the slot is "deaf" (alive but not answering); terminate it with twili,
+     then launch. If twili is disabled or unreachable, note it and go on
+     with the launch, which closes a deaf/suspended application through the
+     HOME menu (HOME, X, A; see the spec change above).
    - Launch (section 2). On success, back to polling. On failure, retry
      with backoff (configurable, default 3 attempts over ~5 minutes), then
      declare "needs a human" (section 4) and keep polling at a slow rate
@@ -88,7 +113,10 @@ step that changes the screen:
      settle, screenshot; if still not HOME, HOME again (the first HOME
      from a running application only suspends it).
    - HOME: proceed.
-3. On HOME: move the cursor to the configured tile (default: the leftmost
+3. On HOME: park the cursor on the leftmost tile (the suspended
+   application, if any) and press X; if the "Close software" prompt
+   (`close-prompt`) appears, press A to close it and verify HOME. Then move
+   the cursor to the configured tile (default: the leftmost
    application tile, `tile = 0`): DLEFT repeated enough times to be sure
    (12), then DRIGHT `tile` times, with settle delays; screenshot; click A.
 4. If a user-select screen appears (profile picker), click A once more.
@@ -108,7 +136,7 @@ distance with a threshold; it must cope with the HOME menu's clock and
 icons changing, so compare a configurable crop or weight the grid, and
 report the best match plus its distance so thresholds can be tuned from
 the logs. Names the supervisor relies on: `home`, `dialog`, `game`,
-`waiter`, `user-select`; anything else is `unknown`. Without references the
+`waiter`, `user-select`, `close-prompt`; anything else is `unknown`. Without references the
 tool still runs, treats every screen as unknown, and says so.
 
 Pillow may be used for JPEG decoding and the synthetic images in the
@@ -136,7 +164,9 @@ body; off by default).
   writes `flags/boot2.flag` (start at boot). It prints exactly what it will
   do and does nothing without `--yes`. `--dry-run` is the default.
 - `coldstart start-sysmodule` runs the twili launch above so the owner can
-  try the sysmodule without a reboot, then checks port 6000.
+  try the sysmodule without a reboot, then checks port 6000. Fallback only:
+  it needs twili, which is leaving the console; the normal path is
+  `install --yes --boot` and a reboot by the owner.
 
 ### 6. Simulator and tests (`make check`)
 
@@ -144,8 +174,9 @@ A simulator so everything above is tested on the host with no console:
 
 - `sim/botbase_sim.py`: a TCP server on a chosen port speaking the
   sys-botbase protocol subset above, driving a fake console with screens
-  HOME / dialog / user-select / game / waiter / asleep, a cursor on the
-  tile row, and rules: A on a tile → user-select (optional) → the "game"
+  HOME / dialog / user-select / game / waiter / close-prompt / asleep, a
+  cursor on the tile row, and rules (plus X on HOME with a suspended app →
+  close-prompt, A there → HOME with nothing suspended, B → back): A on a tile → user-select (optional) → the "game"
   (which then starts a fake rig responder); A on the dialog → HOME; HOME
   from the game → HOME; DLEFT/DRIGHT move the cursor within bounds.
   `pixelPeek` returns a synthetic JPEG of the current screen (distinct
@@ -155,7 +186,8 @@ A simulator so everything above is tested on the host with no console:
   fails).
 - Scenario tests that run the real supervisor against the simulator:
   dead process → launched; dialog → dismissed → launched; deaf slot →
-  terminated → launched; asleep → gives up with the right message; wrong
+  terminated → launched (with twili) and deaf slot → closed from HOME →
+  launched (twili disabled); asleep → gives up with the right message; wrong
   tile → bounded retries; sysmodule missing → hard failure message.
 - Unit tests for the protocol client, the twib output parser, the
   classifier and the config.

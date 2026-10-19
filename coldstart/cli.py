@@ -5,9 +5,9 @@ Commands:
   supervise         watch the rig; relaunch when it stays silent; say when a human is needed
   launch            one launch: HOME -> tile -> A -> wait for the rig (--dry-run prints it)
   shot              screenshot through sys-botbase and classify it (or classify --file)
-  learn NAME        record a reference screen (home, dialog, game, waiter, user-select)
+  learn NAME        record a reference screen (home, dialog, game, waiter, user-select, close-prompt)
   install           put sys-botbase on the SD card over FTP (prints the plan; acts only with --yes)
-  start-sysmodule   start sys-botbase through twili without a reboot, then check port 6000
+  start-sysmodule   fallback: start sys-botbase through twili without a reboot, check port 6000
 
 Exit status: 0 ok, 1 failed, 2 usage/config error, 3 needs a human.
 """
@@ -50,6 +50,15 @@ def cmd_status(cfg, args) -> int:
         print(f"sys-botbase (TCP {cfg.botbase.port}): no answer ({e})")
     ok, how = console_answers(cfg)
     print(f"console {c.host}: " + ("answers, " if ok else "silent, ") + how)
+    if not cfg.twili.enabled:
+        print("twili: disabled (twili.enabled = false)")
+    else:
+        _status_twili(cfg)
+    _status_refs(cfg)
+    return 0
+
+
+def _status_twili(cfg) -> None:
     with tempfile.TemporaryDirectory(prefix="coldstart-status-") as tmp:
         tw = twili_from_config(cfg, Path(tmp))
         try:
@@ -59,6 +68,9 @@ def cmd_status(cfg, args) -> int:
             print(f"twili: unreachable ({e})")
         finally:
             tw.close()
+
+
+def _status_refs(cfg) -> None:
     clf = Classifier.from_config(cfg)
     names = clf.ref_names()
     missing = [lab for lab in LABELS if lab not in {n for n in names} and
@@ -68,7 +80,6 @@ def cmd_status(cfg, args) -> int:
         print(f"references missing: {', '.join(missing)}")
     print("Pillow: " + ("available" if pillow_available() else
                         "MISSING (python3 -m pip install --user pillow)"))
-    return 0
 
 
 def cmd_launch(cfg, args) -> int:
@@ -95,7 +106,8 @@ def cmd_launch(cfg, args) -> int:
 
 def cmd_supervise(cfg, args) -> int:
     log = _runlog(cfg, "supervise")
-    tw = None if args.no_twili else twili_from_config(cfg, log.dir, log=log.log)
+    use_twili = cfg.twili.enabled and not args.no_twili
+    tw = twili_from_config(cfg, log.dir, log=log.log) if use_twili else None
     try:
         sup = Supervisor(cfg, log, twili=tw)
         return sup.run(max_runtime=args.max_runtime, exit_on=set(args.exit_on or []))
@@ -194,7 +206,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-runtime", type=float, help="stop after this many seconds")
     s.add_argument("--exit-on", action="append", choices=("recovered", "human"),
                    help="exit when this happens (repeatable; for scripts and tests)")
-    s.add_argument("--no-twili", action="store_true", help="skip the deaf-slot check")
+    s.add_argument("--no-twili", action="store_true",
+                   help="do not use twili even if twili.enabled (the HOME-menu close path is used)")
     s.set_defaults(func=cmd_supervise)
 
     s = sub.add_parser("launch", help="one launch from whatever is on screen")
@@ -209,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_shot)
 
     s = sub.add_parser("learn", help="record a reference screen")
-    s.add_argument("name", help="home, dialog, game, waiter, user-select (or e.g. home-2)")
+    s.add_argument("name", help="home, dialog, game, waiter, user-select, close-prompt (or e.g. home-2)")
     s.add_argument("--file", help="use this JPEG instead of taking a screenshot")
     s.set_defaults(func=cmd_learn)
 
@@ -221,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="install the v2.5 release artifact from reference/ instead of a local build")
     s.set_defaults(func=cmd_install)
 
-    s = sub.add_parser("start-sysmodule", help="start sys-botbase through twili, check port 6000")
+    s = sub.add_parser("start-sysmodule", help="fallback: start sys-botbase through twili (if twili runs), check port 6000")
     s.add_argument("--wait", type=float, default=90.0, help="seconds to wait for port 6000")
     s.set_defaults(func=cmd_start_sysmodule)
     return p

@@ -45,6 +45,28 @@ class SimRules(unittest.TestCase):
         self.assertEqual(sim.state()["screen"], "home")
         self.assertIsNotNone(sim.state()["app"])   # suspended, not gone
 
+    def test_close_prompt(self):
+        sim = self.sim("--screen", "game")
+        pid = sim.state()["app"]["pid"]
+        b = self.bb(sim)
+        b.click("X")                              # X in the game: nothing
+        b.click("HOME")
+        b.click("X")
+        b.get_version()
+        self.assertEqual(sim.state()["screen"], "close-prompt")
+        b.click("B")                              # back out: still suspended
+        b.get_version()
+        st = sim.state()
+        self.assertEqual((st["screen"], st["app"]["pid"]), ("home", pid))
+        b.click("X")
+        b.click("A")                              # close it
+        b.get_version()
+        st = sim.state()
+        self.assertEqual((st["screen"], st["app"]), ("home", None))
+        b.click("X")                              # nothing suspended: X does nothing
+        b.get_version()
+        self.assertEqual(sim.state()["screen"], "home")
+
     def test_dialog_a_and_unknown_button_is_a(self):
         sim = self.sim("--screen", "dialog")
         b = self.bb(sim)

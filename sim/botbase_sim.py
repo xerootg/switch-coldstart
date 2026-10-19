@@ -14,11 +14,13 @@ Serves, on 127.0.0.1 by default:
   in sim/bin to read and change the state.
 
 The fake console has screens home / dialog / user-select / game / waiter /
-other / asleep, a cursor on a row of tiles ("app" or "other"), and an optional
+other / close-prompt / asleep, a cursor on a row of tiles ("app" or "other"), and an optional
 hbl process. Rules: A on an app tile -> user-select (optional) -> game (or
 waiter); A on an other tile -> other; A on the dialog -> home; HOME from the
 game/waiter/other/user-select -> home (the app stays, suspended); DLEFT/DRIGHT
-move the cursor within bounds; asleep closes every TCP port and silences the
+move the cursor within bounds; X on HOME with a suspended app -> close-prompt,
+whose A closes the app (-> home, nothing suspended) and whose B/HOME go back;
+asleep closes every TCP port and silences the
 rig. pixelPeek returns a synthetic JPEG with a distinct colour layout per
 screen and a clock in the top bar that changes every second.
 
@@ -45,7 +47,7 @@ from PIL import Image, ImageDraw
 BUTTONS = set("A B X Y L R ZL ZR PLUS MINUS HOME CAPTURE DUP DDOWN DLEFT DRIGHT "
               "LSTICK RSTICK DL DU DR DD PALMA UNUSED".split())
 ALIASES = {"DL": "DLEFT", "DU": "DUP", "DR": "DRIGHT", "DD": "DDOWN"}
-SCREENS = ("home", "dialog", "user-select", "game", "waiter", "other", "asleep")
+SCREENS = ("home", "dialog", "user-select", "game", "waiter", "other", "close-prompt", "asleep")
 HBL_TITLE = 0x01007EF00011E000
 BOTBASE_TITLE = "430000000000000B"
 W, H = 1280, 720
@@ -128,11 +130,18 @@ class Console:
             self.events.append(btn)
             s = self.screen
             if btn == "HOME":
-                if s in ("game", "waiter", "other", "user-select"):
+                if s in ("game", "waiter", "other", "user-select", "close-prompt"):
                     self.screen = "home"
                     self.pending_launch = False
+            elif btn == "X":
+                if s == "home" and self.app is not None:
+                    self.screen = "close-prompt"
             elif btn == "A":
                 if s == "dialog":
+                    self.screen = "home"
+                elif s == "close-prompt":
+                    self.events.append(f"closed 0x{self.app['pid']:x}" if self.app else "closed none")
+                    self.app = None
                     self.screen = "home"
                 elif s == "home":
                     tile = self.tiles[self.cursor] if self.tiles else None
@@ -152,7 +161,9 @@ class Console:
                     self.app = None
                     self._start_app()
             elif btn == "B":
-                if s == "user-select":
+                if s == "close-prompt":
+                    self.screen = "home"
+                elif s == "user-select":
                     self.screen = "home"
                     self.pending_launch = False
             elif btn in ("DLEFT", "DRIGHT") and s == "home":
@@ -176,7 +187,7 @@ class Console:
             screen, cursor, tiles = self.screen, self.cursor, list(self.tiles)
         im = Image.new("RGB", (W, H))
         d = ImageDraw.Draw(im)
-        if screen in ("home", "dialog"):
+        if screen in ("home", "dialog", "close-prompt"):
             d.rectangle((0, 0, W, H), fill=(45, 45, 60))
             # top bar: a "clock" whose colour changes every second
             sec = int(time.time())
@@ -195,6 +206,12 @@ class Console:
                 d = ImageDraw.Draw(im)
                 d.rectangle((290, 200, 990, 520), fill=(250, 250, 250))
                 d.rectangle((290, 440, 990, 520), fill=(30, 140, 230))
+            elif screen == "close-prompt":
+                im = Image.blend(im, Image.new("RGB", (W, H), (0, 0, 0)), 0.6)
+                d = ImageDraw.Draw(im)
+                d.rectangle((240, 160, 1040, 560), fill=(70, 70, 75))
+                d.rectangle((240, 470, 640, 560), fill=(220, 40, 40))
+                d.rectangle((640, 470, 1040, 560), fill=(250, 250, 250))
         elif screen == "user-select":
             d.rectangle((0, 0, W, H), fill=(20, 90, 200))
             for i in range(3):

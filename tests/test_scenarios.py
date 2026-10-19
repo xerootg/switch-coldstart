@@ -60,13 +60,53 @@ class Scenarios(unittest.TestCase):
         r = sim.run(*SUPERVISE)
         out = r.stdout
         self.assertEqual(r.returncode, 0, out)
-        self.assertIn_("no process with title 0x01007ef00011e000: the slot is dead", out)
+        self.assertIn_("twili disabled", out)
         self.assertIn_("shot 01-screen-0.jpg: home", out)
+        self.assertIn_("close-check.jpg: home", out)     # X with nothing suspended: harmless
+        self.assertIn_("no suspended application", out)
         self.assertIn_("recovered: rig answers as game", out)
         st = sim.state()
         self.assertEqual(st["screen"], "game")
         self.assertNotIn("press R", st["events"])
+        self.assertEqual(sim.twib_calls(), [])
+
+    def test_dead_process_with_twili(self):
+        sim = self.sim("--screen", "home", extra={"twili": {"enabled": True}})
+        r = sim.run(*SUPERVISE)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("no process with title 0x01007ef00011e000: the slot is dead", r.stdout)
         self.assertTrue(any(c.endswith(" ps") for c in sim.twib_calls()))
+
+    def test_deaf_slot_without_twili_is_closed_from_home(self):
+        sim = self.sim("--screen", "game", "--deaf")
+        old_pid = sim.state()["app"]["pid"]
+        r = sim.run(*SUPERVISE)
+        out = r.stdout
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn_("screen-0.jpg: game", out)
+        self.assertIn_("in the foreground although the rig is silent: deaf slot", out)
+        self.assertIn_("close-check.jpg: close-prompt", out)
+        self.assertIn_("after-close.jpg: home", out)
+        self.assertIn_("recovered: rig answers as game", out)
+        st = sim.state()
+        ev = [e for e in st["events"] if not e.startswith("set ")]
+        self.assertEqual(ev[0], "HOME")
+        self.assertIn(f"closed 0x{old_pid:x}", ev)
+        i = ev.index("X")
+        self.assertEqual(ev[i + 1], "A")
+        self.assertNotEqual(st["app"]["pid"], old_pid)
+        self.assertEqual(sim.twib_calls(), [])
+
+    def test_deaf_app_suspended_at_home_is_closed(self):
+        sim = self.sim("--screen", "waiter", "--land", "waiter", "--deaf")
+        old_pid = sim.state()["app"]["pid"]
+        sim.set(screen="home")           # suspended behind HOME, deaf, rig silent
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("screen-0.jpg: home", r.stdout)
+        self.assertIn_("an application is suspended while the rig is silent", r.stdout)
+        self.assertIn_("ok: rig answers as waiter", r.stdout)
+        self.assertIn(f"closed 0x{old_pid:x}", sim.state()["events"])
 
     def test_dialog_is_dismissed_then_launched(self):
         sim = self.sim("--screen", "dialog")
@@ -81,7 +121,7 @@ class Scenarios(unittest.TestCase):
         self.assertNotIn("HOME", ev)              # nothing else was needed
 
     def test_deaf_slot_is_terminated_then_launched(self):
-        sim = self.sim("--screen", "game", "--deaf")
+        sim = self.sim("--screen", "game", "--deaf", extra={"twili": {"enabled": True}})
         old_pid = sim.state()["app"]["pid"]
         r = sim.run(*SUPERVISE)
         out = r.stdout
@@ -101,7 +141,6 @@ class Scenarios(unittest.TestCase):
         r = sim.run(*SUPERVISE)
         out = r.stdout
         self.assertEqual(r.returncode, 3, out)
-        self.assertIn_("twili unreachable", out)
         self.assertIn_("NEEDS A HUMAN (console_down): the console 127.0.0.1 does not answer at all", out)
         self.assertIn_("asleep, off, or on a fatal error screen", out)
         self.assertIn_("Next: wake or power on the console", out)
@@ -141,15 +180,13 @@ class Scenarios(unittest.TestCase):
         self.assertIn_("after-a.jpg: user-select", r.stdout)
         self.assertIn_("ok: rig answers as game", r.stdout)
 
-    def test_from_running_game_goes_home_first(self):
-        sim = self.sim("--screen", "waiter", "--land", "waiter", "--deaf")
+    def test_blind_never_presses_x(self):
+        sim = self.sim("--screen", "home", refs_dir=None)
+        self.assertEqual(sim.state()["screen"], "home")   # blind here: no X at all
         r = sim.run("launch")
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertIn_("screen-0.jpg: waiter", r.stdout)
-        self.assertIn_("click HOME", r.stdout)
-        # tile 0 is the suspended app: A resumes it (the deaf flag stays, so it
-        # stays silent) -- the supervisor's twili step exists for exactly this.
-        self.assertIn_("launch FAILED (launch_failed): no rig answer", r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("blind: not pressing X", r.stdout)
+        self.assertNotIn("X", sim.state()["events"])
 
     def test_blind_launch_without_references(self):
         sim = self.sim("--screen", "home", "--user-select", refs_dir=None)
@@ -182,14 +219,14 @@ class Scenarios(unittest.TestCase):
         self.assertEqual([e for e in sim.state()["events"] if not e.startswith("set ")], [])
 
     def test_twili_unreachable_goes_on_with_launch(self):
-        sim = self.sim("--screen", "home", extra={"twili": {"twib": "/nonexistent/twib"}})
+        sim = self.sim("--screen", "home", extra={"twili": {"enabled": True, "twib": "/nonexistent/twib"}})
         r = sim.run(*SUPERVISE)
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn_("twili unreachable", r.stdout)
         self.assertIn_("recovered: rig answers as game", r.stdout)
 
     def test_terminate_failure_is_retried_then_needs_human(self):
-        sim = self.sim("--screen", "game", "--deaf", env={"FAKE_TWIB_TERMINATE": "fail"})
+        sim = self.sim("--screen", "game", "--deaf", env={"FAKE_TWIB_TERMINATE": "fail"}, extra={"twili": {"enabled": True}})
         r = sim.run(*SUPERVISE)
         self.assertEqual(r.returncode, 3, r.stdout)
         self.assertIn_("could not terminate the deaf process", r.stdout)
@@ -227,7 +264,7 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(list(sim.tmp.glob("runs/*/twibd.sock")), [])
 
     def test_sigterm_stops_cleanly_and_reaps_twibd(self):
-        sim = self.sim("--screen", "asleep")
+        sim = self.sim("--screen", "asleep", extra={"twili": {"enabled": True}})
         p = sim.spawn("supervise", "--max-runtime", "40")
         self.addCleanup(stop, p)
         sim.wait_for_output("NEEDS A HUMAN (console_down)")
@@ -249,7 +286,9 @@ class Scenarios(unittest.TestCase):
         self.assertTrue(any("launch 430000000000000B none" in c for c in sim.twib_calls()))
 
     def test_status_reports_what_answers(self):
-        sim = self.sim("--screen", "game")
+        r = self.sim("--screen", "game").run("status")
+        self.assertIn_("twili: disabled (twili.enabled = false)", r.stdout)
+        sim = self.sim("--screen", "game", extra={"twili": {"enabled": True}})
         r = sim.run("status")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn_("[launch]", r.stdout)
@@ -266,7 +305,8 @@ class Scenarios(unittest.TestCase):
         runs = list(sim.tmp.glob("runs/*-launch"))
         self.assertEqual(len(runs), 1)
         names = sorted(p.name for p in runs[0].glob("*.jpg"))
-        self.assertEqual(names[:3], ["01-screen-0.jpg", "02-screen-1.jpg", "03-tile-0.jpg"])
+        self.assertEqual(names[:4], ["01-screen-0.jpg", "02-screen-1.jpg", "03-close-check.jpg",
+                                     "04-tile-0.jpg"])
         self.assertTrue((runs[0] / "log.txt").read_text().count("\n") > 5)
 
 

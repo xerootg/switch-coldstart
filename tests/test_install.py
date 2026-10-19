@@ -88,6 +88,15 @@ class InstallTests(unittest.TestCase):
         self.assertIn(("mkd", "/atmosphere/contents"), ftp.ops)
         self.assertEqual(list(ftp.files), ["/atmosphere/contents/430000000000000B/exefs.nsp"])
         self.assertIn("NOT start at boot", "\n".join(self.lines))
+        self.assertIn("re-run with --boot and reboot", self.lines[-1])
+
+    def test_yes_with_boot_says_reboot(self):
+        ftp = FakeFTP()
+        rc = install.install(self.cfg, self.lines.append, yes=True, boot=True, release=True,
+                             ftp_factory=lambda: ftp)
+        self.assertEqual(rc, 0, self.lines)
+        self.assertIn("/atmosphere/contents/430000000000000B/flags/boot2.flag", ftp.files)
+        self.assertIn("reboot the console", self.lines[-1])
 
     def test_ftp_failure_is_reported(self):
         class Broken(FakeFTP):

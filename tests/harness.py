@@ -18,7 +18,7 @@ SIM_BIN = REPO / "sim" / "bin"
 
 FAST = {
     "launch": {"settle_home_s": 0.1, "settle_dpad_s": 0.0, "settle_a_s": 0.3,
-               "settle_dialog_s": 0.1, "wait_rig_s": 2.0, "rig_poll_s": 0.2},
+               "settle_dialog_s": 0.1, "settle_close_s": 0.2, "wait_rig_s": 2.0, "rig_poll_s": 0.2},
     "supervise": {"poll_s": 0.2, "silent_s": 0.6, "heartbeat_s": 600.0, "attempts": 3,
                   "backoff_s": [0.3], "human_poll_s": 0.3, "human_rearm_s": 0.0},
     "twili": {"timeout_s": 10.0, "terminate_wait_s": 2.0},
@@ -186,7 +186,7 @@ def shared_refs() -> Path:
     _REFS = Path(tempfile.mkdtemp(prefix="coldstart-refs-"))
     atexit.register(shutil.rmtree, _REFS, True)
     with Sim(refs_dir=_REFS) as sim:
-        for screen in ("home", "dialog", "user-select", "game", "waiter"):
+        for screen in ("home", "dialog", "user-select", "game", "waiter", "close-prompt"):
             sim.set(screen=screen, cursor=0)
             r = sim.run("learn", screen)
             if r.returncode != 0:

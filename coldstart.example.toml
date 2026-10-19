@@ -8,7 +8,7 @@
 [console]
 host = "192.168.128.150"
 ftp_port = 5000            # sys-ftpd; also proves "the console answers"
-twili_port = 15152         # twili's TCP bridge; also proves "the console answers"
+twili_port = 15152         # twili's TCP bridge, if it runs; also proves "the console answers"
 probe_timeout_s = 2.0
 icmp = false               # also try `ping -c1` (a sleeping Switch may still answer it)
 
@@ -23,6 +23,7 @@ port = 5600
 ping_timeout_s = 1.0
 
 [twili]
+enabled = false            # optional; without it deaf apps are closed via HOME, X, A
 twib = "twib"
 twibd = "twibd"
 socket = ""                # empty: run our own twibd; else the socket of a running twibd
@@ -37,6 +38,7 @@ settle_home_s = 2.5        # after HOME (the menu animates)
 settle_dpad_s = 0.4
 settle_a_s = 3.0           # after A on a tile / on the profile picker
 settle_dialog_s = 2.0      # after A on an error dialog
+settle_close_s = 4.0       # after A on the "Close software" prompt
 max_normalize_steps = 5    # screenshots/presses spent getting to HOME
 wait_rig_s = 120.0
 rig_poll_s = 2.0

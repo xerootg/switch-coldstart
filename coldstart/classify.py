@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-LABELS = ("home", "dialog", "game", "waiter", "user-select")
+LABELS = ("home", "dialog", "game", "waiter", "user-select", "close-prompt")
 UNKNOWN = "unknown"
 
 
