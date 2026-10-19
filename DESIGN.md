@@ -92,8 +92,8 @@ stop it cleanly and stop the twibd it started.
    none answer → `console_down`, one answers → `botbase_down`. All three are
    hard failures.
 2. Up to `max_normalize_steps` (5) times: screenshot, classify. `home` →
-   proceed; `dialog` → A; anything else (game, waiter, user-select,
-   close-prompt, unknown) → HOME. A final screenshot must be `home`, else the
+   proceed; `dialog` → A; `update-prompt` → B (A there is Download);
+   anything else (game, waiter, user-select, close-prompt, unknown) → HOME. A final screenshot must be `home`, else the
    attempt fails (soft). Without twili, "a homebrew process is alive" is
    exactly this: the rig is silent and the first screenshot shows an
    application (game/waiter/hbmenu); it is logged as a deaf slot, and HOME
@@ -103,30 +103,40 @@ stop it cleanly and stop the twibd it started.
    suspended one if any. X, screenshot: `close-prompt` → A (settle
    `settle_close_s`), screenshot must be `home` (an error dialog in between
    is dismissed with A); `home` → nothing was suspended, X was a no-op;
-   anything else → B and the attempt fails.
+   anything else (an update prompt, an ambiguous match) → B and the attempt
+   fails, never A.
 4. DRIGHT × `tile`, screenshot (a non-HOME here is logged as a warning), A.
-5. Screenshot: `user-select` → A; `dialog` → attempt fails.
+5. Screenshot: `update-prompt` ("A new update is available", cursor on
+   Download) → DUP (to "Start Software", settle dpad), A (settle a),
+   screenshot; still `update-prompt` → B, attempt fails. Then `user-select`
+   → A; `dialog` → attempt fails.
 6. Ping the rig every `rig_poll_s` for up to `wait_rig_s` (120 s). Success
    reports the role (game or waiter) and the elapsed time. Timeout → a last
    screenshot for the log, attempt fails (soft).
 
 **Screenshots.** `screenshot.source = "album"` (default): list the album
-(`/Nintendo/Album/YYYY/MM/DD/*.jpg`, walked over FTP; sys-ftpd's NLST gives
+(`<root>/YYYY/MM/DD/*.jpg`, walked over FTP; root `auto` = `/emummc/emummc.ini`'s
+`nintendo_path` + `/Album` when emuMMC is enabled, else `/Nintendo/Album`,
+resolved once per process; sys-ftpd's NLST gives
 full paths, bare names are joined too), click CAPTURE, wait
 `capture_wait_s`, list again until a file appears that was not there before
 (up to `capture_timeout_s`), take the newest-named new file, download it,
 delete it (`delete_after`). The console clock is unreliable (2025/2026/2051
 all seen), so the host's date is never used and "newest overall" is never
 trusted on its own: a stale far-future name would otherwise be re-read
-forever. If the new file does not sort last, that is logged. No new file =
+forever. If the new file does not sort last, that is logged (once per process per
+far-future file: it stays on the card). No new file =
 the capture was refused on this screen → `unknown`. FTP down → no
 screenshots → blind. `"pixelpeek"`: sys-botbase's pixelPeek, empty reply =
 unsupported → blind.
 
 **Blind mode.** Without references, without Pillow, or when screenshots are
 unavailable (FTP down, or pixelPeek unsupported), screens cannot be told apart,
-and the prototype's sequence runs instead: HOME, HOME, DLEFT × 12, DRIGHT ×
-tile, A, A. It is logged as blind. It never presses X: if nothing is
+and a reduced prototype sequence runs instead: HOME, HOME, DLEFT × 12,
+DRIGHT × tile, A. It is logged as blind. The prototype's second A (for a
+profile picker) is only sent with `launch.blind_second_a = true`: when the
+HOME menu shows the update prompt its cursor starts on Download, and a blind
+A downloaded an update on the rig's console (error 2123-0011). It never presses X: if nothing is
 suspended, the following A would be a blind A on the HOME menu, so a
 suspended deaf application cannot be closed blind. It cannot see an error dialog: the first
 attempt's A then only dismisses the dialog, and the next attempt launches.
@@ -144,7 +154,10 @@ refuses `press R` outright.
 | rig silent, nothing running                 | ping timeout, HOME on screen, X no-op     | launch |
 | rig silent, application in the foreground   | ping timeout, game/waiter/unknown screen  | HOME, X, A (close), then launch |
 | rig silent, application suspended behind HOME | ping timeout, X shows `close-prompt`    | A (close), then launch |
-| X shows neither HOME nor the close prompt   | classification                            | B, soft failure |
+| X shows neither HOME nor the close prompt (or an ambiguous match) | classification | B (never A), soft failure |
+| update prompt after A on the tile           | `update-prompt`                           | DUP, A (Start Software), continue |
+| update prompt while normalising             | `update-prompt`                           | B (cancel) |
+| screen ambiguous between two labels         | rival label within 2 × d + 3              | `unknown` (no A on it) |
 | (twili enabled) hbl alive, rig silent       | `twib ps` lists hbl                       | terminate, then launch |
 | (twili enabled) terminate fails             | twib error / still listed                 | soft failure (retry, then human) |
 | twili disabled or unreachable               | config / twib errors                      | logged, launch (HOME-menu close path) |
@@ -166,7 +179,21 @@ Crop (`classify.crop`, default the screen minus the top 12 % where the clock
 and battery are), downsample with box filtering to `classify.grid` (16×9)
 mean colours, distance = mean Euclidean RGB distance per cell (0 to ~441).
 The nearest reference wins if within `classify.threshold` (40), else
-`unknown`. The nearest name and distance, and the next three, are logged for
+`unknown`. Ambiguity: HOME-menu dialogs share one layout. Measured on the
+rig's console: identical screen 0.1–2, the same dialog type 0.6–9,
+different dialog types 5–20, HOME vs dialogs ~60. So if the nearest
+reference with a different label is closer than `ambiguity_factor` × d +
+`ambiguity_offset` (2 × d + 3) the screen is `unknown`, "ambiguous between
+X and Y". The offset is the capture noise floor (two references within the
+noise of one screen cannot be told apart), the factor demands the winner be
+twice as close as any rival. On the hardware references it keeps
+update-prompt (0.7–0.8 vs close-prompt 5.2, limit ≤4.6), close-prompt (0.6
+vs 6.0) and the error dialog (1.4 vs 17.2) and rejects an unrecorded OK
+dialog that sat at update-prompt 7.9 / close-prompt 9.0. It only helps
+against recorded rivals: with no `update-prompt` reference the update
+prompt was close-prompt at 5.2 with dialog the next label at 19.1 — a
+confident misread. Hence the label, and actions that press A on a dialog
+require an unambiguous match. The nearest name and distance, and the next three, are logged for
 every screenshot, so the threshold can be tuned from a night's log. A
 reference's label is its name or, for `home-2` style names, the known label
 it starts with. In the simulator, same-screen distances are ~0–5 and

@@ -32,9 +32,13 @@ as `NN-<step>.jpg`, so a failed night can be read in the morning.
 - For building the sysmodule: devkitPro with devkitA64 and libnx
   (`/opt/devkitpro` by default, or `$DEVKITPRO`).
 - The console: sys-ftpd on port 5000 (anonymous). Screenshots are taken by
-  pressing CAPTURE and fetching the new image from `/Nintendo/Album` over
-  FTP (then deleting it from the card), because sys-botbase's `pixelPeek`
-  is refused on this console (capsrv 0xE0CE: the real DebugModeFlag is off;
+  pressing CAPTURE and fetching the new image from the album over FTP (then
+  deleting it from the card). The album is found automatically
+  (`screenshot.album_root = "auto"`): with emuMMC enabled in
+  `/emummc/emummc.ini` it is `/<nintendo_path>/Album` (on the rig's console
+  `/emuMMC/RAW1/Nintendo/Album`), otherwise `/Nintendo/Album`; `status`
+  prints the resolved root, and an explicit path in the config wins. The
+  album route exists because sys-botbase's `pixelPeek` is refused on this console (capsrv 0xE0CE: the real DebugModeFlag is off;
   `enable_am_debug_mode` only fakes it for am). `screenshot.source =
   "pixelpeek"` selects pixelPeek on consoles where it works.
 - HOME-menu auto-sleep set to Never (System Settings → Sleep Mode).
@@ -120,6 +124,7 @@ and run `learn` with its name:
 | `waiter`      | the rig's waiter running                                             |
 | `game`        | the game running                                                     |
 | `close-prompt`| HOME with the game suspended, then X: the "Close software" prompt (press B afterwards) |
+| `update-prompt`| "A new update is available" after A on the tile, if the console offers one (press B afterwards; never A, the cursor is on Download) |
 
 ```
 bin/coldstart learn home
@@ -134,6 +139,14 @@ references can stand for one screen: `home-2`, `home-dark`,
 `user-select-2` all count as their prefix's label. Any other name classifies
 as itself, which the supervisor treats like an unknown screen.
 
+All HOME-menu dialogs share one layout, so record every dialog you meet
+(`update-prompt`, and further `dialog-2`, `dialog-ok`...): a screen whose
+nearest reference has another label within 2 × d + 3 of it
+(`classify.ambiguity_factor`, `ambiguity_offset`) is `unknown`, "ambiguous
+between X and Y", and the tool never presses A on it. That rule only
+protects against dialogs that have a reference: without `update-prompt` the
+update prompt was a confident `close-prompt` (5.2, next label 19.1).
+
 Tuning: every classification is logged as e.g.
 `home (nearest home d=4.8; next dialog=109.0, game=117.4)`. The distance is
 the mean RGB distance over a 16×9 grid (`classify.grid`) of the screen minus
@@ -142,8 +155,11 @@ its top 12 % (`classify.crop`, so the clock does not count). A screen is
 (40). If the HOME menu's tiles or theme change the distances, record a
 second `home-2` rather than raising the threshold a lot.
 
-Without any references the tool still works, "blind": HOME, HOME, tile, A, A
-(the prototype's sequence) and only the rig's answer decides success. Blind
+Without any references the tool still works, "blind": HOME, HOME, tile, A,
+and only the rig's answer decides success. The prototype's second A (for a
+profile picker) is off unless `launch.blind_second_a = true`: on the update
+prompt the cursor starts on Download, so a blind second A downloads the
+update. Blind
 mode cannot close a suspended deaf application (it never presses X without
 seeing the screen), so record the references, `close-prompt` included.
 
@@ -166,7 +182,9 @@ it:
    is silent means a deaf slot: HOME suspends it, and on HOME the tool parks
    the cursor on tile 0 (the suspended application), presses X and, if the
    "Close software" prompt appears, A to close it. With nothing suspended,
-   X does nothing. Then it selects the tile and presses A. (With
+   X does nothing. Then it selects the tile and presses A; if the update
+   prompt appears it presses DUP (to "Start Software") and A, and A again on
+   the profile picker. (With
    `twili.enabled = true` it first asks twili for the hbl process and
    terminates a deaf one; twili unreachable is noted and ignored.) On
    success it goes back to watching;
@@ -218,6 +236,36 @@ Stop the supervisor with Ctrl-C or SIGTERM; it stops the twibd it started.
 - **Captures refused on some screens** count as `unknown`; if the album
   fills up or sys-ftpd is down, screenshots stop and launches run blind.
 
+## Hardware notes (2026-10-19)
+
+From the first run against the real console (firmware 20.2.0, Atmosphère
+1.11.2, emuMMC):
+
+- **X on HOME** with a suspended application opens "Close the software you
+  are currently using?" with Cancel and Close, the cursor on Close: A closes
+  it. Confirmed.
+- **CAPTURE through sys-botbase** works on the HOME menu and on its dialogs,
+  but is refused ("Unable to take a screenshot", no album file) while a
+  homebrew application that has not presented a frame, or applet-mode
+  homebrew, is in front. Those screens classify as `unknown` (HOME is then
+  pressed).
+- **Cold launch time:** the first cold launch took 73 s from the tile's A
+  until the rig's waiter answered; `launch.wait_rig_s` (120 s) covers it.
+- **Error 2123-0011** ("restart the console"): A on the tile showed "A new
+  update is available. It will be downloaded now." (Start Software above
+  Cancel and Download, cursor on Download); the A that followed pressed
+  Download and the download failed. The tool now recognises
+  `update-prompt` and goes DUP, A; blind mode no longer sends a second A.
+  The prompt classified as `close-prompt` at 5.2 before it had its own
+  reference, hence the ambiguity rule.
+- **emuMMC album:** captures land in `/emuMMC/RAW1/Nintendo/Album`
+  (`/emummc/emummc.ini`: `nintendo_path=emuMMC/RAW1/Nintendo`), not
+  `/Nintendo/Album`; `album_root = "auto"` finds it.
+- **Clicks:** sys-botbase's default 50 ms clicks register on the HOME menu
+  and its dialogs; `botbase.click_hold_ms` can stay 0.
+- The album holds a far-future (2051) file from an earlier clock jump; its
+  "sorts after the new image" note is logged once per run.
+
 ## Development
 
 ```
@@ -226,9 +274,9 @@ make check     # byte-compile, unit + scenario tests (~3 min), shellcheck if ins
 
 Everything is tested against `sim/botbase_sim.py`, a fake console speaking
 the sys-botbase subset with HOME / dialog / user-select / game / waiter /
-close-prompt / asleep / off screens, a small FTP server over an SD-card
-directory whose album receives CAPTURE images (with a skewable console
-clock), a fake rig responder, and fake `twib`/`twibd` in `sim/bin`.
+close-prompt / update-prompt / asleep / off screens, a small FTP server
+over an SD-card directory whose album receives CAPTURE images (with a
+skewable console clock; `--emummc` redirects it like the rig's console), a fake rig responder, and fake `twib`/`twibd` in `sim/bin`.
 To try the tool by hand without a console:
 
 ```

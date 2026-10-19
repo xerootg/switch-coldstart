@@ -127,6 +127,33 @@ connection, but commands time out. Therefore:
 - The simulator distinguishes `asleep` (port 6000 accepts, nothing answers,
   FTP and rig silent) from `off` (every port refuses).
 
+### Spec change 2026-10-19 (first hardware run)
+
+- **emuMMC album.** The console runs emuMMC, whose Nintendo folder is
+  redirected: captures land in `/emuMMC/RAW1/Nintendo/Album`. The default
+  `screenshot.album_root = "auto"` reads `/emummc/emummc.ini` over the same
+  FTP on first use: `enabled` nonzero and `nintendo_path` set → `/` +
+  nintendo_path + `/Album`, otherwise `/Nintendo/Album`. An explicit path
+  wins. The resolved root is logged once and printed by `status`. The
+  simulator serves the ini and the redirected album with `--emummc`.
+- **Update prompt.** A on the tile can show the HOME menu's "A new update is
+  available. It will be downloaded now." with "Start Software" (top, full
+  width) above "Cancel" and "Download"; the cursor starts on Download, so A
+  downloads (which ended in error 2123-0011, "restart the console"). New
+  label `update-prompt`: after the tile's A it gets DUP then A (Start
+  Software), then the normal flow (user-select → A); while normalising to
+  HOME it gets B; behind X on HOME it is unexpected (B, attempt fails). It
+  never gets A alone. Blind mode no longer presses the prototype's second A
+  unless `launch.blind_second_a = true`.
+- **Ambiguity.** All HOME-menu dialogs share a layout (different dialog types
+  5-20 apart, the same screen 0.1-2, HOME vs dialogs ~60), so the update
+  prompt was classified close-prompt at 5.2. A nearest match whose nearest
+  other-label reference is closer than `ambiguity_factor` × nearest +
+  `ambiguity_offset` (2 × d + 3) is `unknown` ("ambiguous between X and
+  Y"); A on close-prompt needs an unambiguous match.
+- The "console clock jumped" capture note is logged once per process, not on
+  every screenshot.
+
 ## What the tool must do
 
 ### 1. Supervise (`coldstart supervise`)
@@ -188,7 +215,7 @@ distance with a threshold; it must cope with the HOME menu's clock and
 icons changing, so compare a configurable crop or weight the grid, and
 report the best match plus its distance so thresholds can be tuned from
 the logs. Names the supervisor relies on: `home`, `dialog`, `game`,
-`waiter`, `user-select`, `close-prompt`; anything else is `unknown`. Without references the
+`waiter`, `user-select`, `close-prompt`, `update-prompt`; anything else is `unknown`. Without references the
 tool still runs, treats every screen as unknown, and says so.
 
 Pillow may be used for JPEG decoding and the synthetic images in the
