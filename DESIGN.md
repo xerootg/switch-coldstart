@@ -12,6 +12,7 @@ failure is handled, and the decisions taken where SPEC.md left room.
 | `coldstart/botbase.py`  | sys-botbase client (TCP 6000)                                       |
 | `coldstart/rig.py`      | rig control port client (UDP 5600), loose reply parsing             |
 | `coldstart/twili.py`    | optional `twib`/`twibd` wrapper: ps, terminate, sysmodule launch; `ps` parser |
+| `coldstart/capture.py`  | screenshot sources: album (CAPTURE + FTP) and pixelPeek             |
 | `coldstart/classify.py` | reference store and nearest-reference classifier                    |
 | `coldstart/probe.py`    | "does the console answer at all", webhook                           |
 | `coldstart/launch.py`   | the launch sequence and its failure kinds                           |
@@ -68,16 +69,28 @@ failure is handled, and the decisions taken where SPEC.md left room.
   N times" it retries after `human_rearm_s` (30 min) so a one-off glitch at
   night does not need a human in the morning.
 
+**Keep-awake.** The HOME menu auto-sleeps (about 5 min after boot on this
+console) and sys-botbase cannot wake it. Whenever a ping gets no answer in
+WATCH, BACKOFF or HUMAN(launch_failed), and `keepawake_s` (120 s) has passed
+since the last keep-awake or launch, the supervisor connects to sys-botbase
+and clicks `keepawake_button` (ZR: nothing on HOME). It is never sent when
+the rig answered the ping just before (the game disables auto-sleep itself
+and must not get stray input), nor in HUMAN after asleep/console_down/
+botbase_down. A failed click is logged and ignored. Known gap: a deaf
+application in the foreground during the first `silent_s` gets the ZR too.
+
 `supervise --exit-on recovered|human` and `--max-runtime` exist for scripts
 and the tests; normal use is to leave it running in tmux. SIGTERM/Ctrl-C
 stop it cleanly and stop the twibd it started.
 
 ## Launch sequence
 
-1. Connect to sys-botbase, `getVersion`. If that fails, probe the console's
+1. Connect to sys-botbase, `getVersion`. Connected but `getVersion` times
+   out → `asleep` (the sleeping console surfaces on the network and accepts
+   on 6000, but commands time out). Connect fails → probe the console's
    always-on TCP services (sys-ftpd 5000, twili 15152; ICMP optionally):
-   none answer → `console_down`, one answers → `botbase_down`. Both are hard
-   failures.
+   none answer → `console_down`, one answers → `botbase_down`. All three are
+   hard failures.
 2. Up to `max_normalize_steps` (5) times: screenshot, classify. `home` →
    proceed; `dialog` → A; anything else (game, waiter, user-select,
    close-prompt, unknown) → HOME. A final screenshot must be `home`, else the
@@ -97,8 +110,21 @@ stop it cleanly and stop the twibd it started.
    reports the role (game or waiter) and the elapsed time. Timeout → a last
    screenshot for the log, attempt fails (soft).
 
-**Blind mode.** Without references, without Pillow, or when `pixelPeek`
-returns nothing (Atmosphère debug mode off), screens cannot be told apart,
+**Screenshots.** `screenshot.source = "album"` (default): list the album
+(`/Nintendo/Album/YYYY/MM/DD/*.jpg`, walked over FTP; sys-ftpd's NLST gives
+full paths, bare names are joined too), click CAPTURE, wait
+`capture_wait_s`, list again until a file appears that was not there before
+(up to `capture_timeout_s`), take the newest-named new file, download it,
+delete it (`delete_after`). The console clock is unreliable (2025/2026/2051
+all seen), so the host's date is never used and "newest overall" is never
+trusted on its own: a stale far-future name would otherwise be re-read
+forever. If the new file does not sort last, that is logged. No new file =
+the capture was refused on this screen → `unknown`. FTP down → no
+screenshots → blind. `"pixelpeek"`: sys-botbase's pixelPeek, empty reply =
+unsupported → blind.
+
+**Blind mode.** Without references, without Pillow, or when screenshots are
+unavailable (FTP down, or pixelPeek unsupported), screens cannot be told apart,
 and the prototype's sequence runs instead: HOME, HOME, DLEFT × 12, DRIGHT ×
 tile, A, A. It is logged as blind. It never presses X: if nothing is
 suspended, the following A would be a blind A on the HOME menu, so a
@@ -122,9 +148,11 @@ refuses `press R` outright.
 | (twili enabled) hbl alive, rig silent       | `twib ps` lists hbl                       | terminate, then launch |
 | (twili enabled) terminate fails             | twib error / still listed                 | soft failure (retry, then human) |
 | twili disabled or unreachable               | config / twib errors                      | logged, launch (HOME-menu close path) |
-| console asleep / off / fatal                | no TCP on 6000, 5000, 15152 (ICMP opt.)   | hard: `console_down`; resumes when sys-botbase answers |
+| console asleep                              | 6000 accepts, `getVersion` times out      | hard: `asleep` ("press HOME or POWER"); resumes when sys-botbase answers |
+| console off / fatal                         | no TCP on 6000, 5000, 15152 (ICMP opt.)   | hard: `console_down`; resumes when sys-botbase answers |
 | sys-botbase not running                     | 6000 refused, 5000 or 15152 accept        | hard: `botbase_down`; resumes when it answers |
-| screenshots unavailable                     | `pixelPeek` empty line                    | blind for the rest of the attempt |
+| screenshots unavailable                     | FTP fails / `pixelPeek` empty line        | blind for the rest of the attempt |
+| capture refused on a screen                 | no new album file after CAPTURE           | that screen is `unknown` |
 | HOME not reached                            | 5 normalize steps without `home`          | soft failure |
 | wrong tile / tile does not start the rig    | no rig answer within `wait_rig_s`         | soft failure, bounded retries, then human |
 | dialog after A on the tile                  | classification                            | soft failure |
@@ -179,8 +207,17 @@ different screens are >100 apart.
   (socket in the run directory, or a short temp path when that would exceed
   the AF_UNIX limit), reaps it on exit, and runs `connect-tcp` whenever `ps`
   reports no device.
-- **Simulator FTP** only greets (it stands in for "the console answers TCP");
-  `install --yes` is tested against an in-process fake `ftplib` object.
+- **Album capture identification** uses "a file that was not there before
+  CAPTURE" (newest name among those if several) rather than "the newest
+  name is newer than before"; with the console's clock jumping, a stale
+  far-future name would otherwise block every later capture. The
+  coordinator's "strictly newer" check is the special case where the clock
+  is sane.
+- **Keep-awake only while the rig is silent**, not while the waiter answers
+  (the waiter is an application, not HOME).
+- **Simulator FTP** is a small stdlib server (USER PASS SYST TYPE PWD CWD
+  PASV NLST LIST RETR STOR DELE MKD SIZE QUIT); the album client and
+  `install --yes` are tested against it in-process and through the CLI.
 
 ## sys-botbase facts relied on (from the pinned source)
 
@@ -201,4 +238,8 @@ recognised by the HOME menu on firmware 20.2.0 (`click_hold_ms` is the knob
 if not), that X on HOME opens "Close software" for the suspended application
 with the cursor on its tile (and does nothing when none is suspended), the
 real `twib` output and exit codes beyond the documented `ps`
-table, the error dialog's response to A, and pixelPeek's size and latency.
+table, the error dialog's response to A, how long the console takes to
+write a capture into the album (`capture_wait_s`), whether the "screenshot
+saved" toast changes the next capture enough to matter (it sits low on the
+screen inside the compared crop), whether CAPTURE is refused on the HOME
+menu or the close prompt, and sys-ftpd's exact NLST output.

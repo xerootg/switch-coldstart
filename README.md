@@ -31,8 +31,13 @@ as `NN-<step>.jpg`, so a failed night can be read in the morning.
   and stops its own `twibd` unless you point `twili.socket` at a running one.
 - For building the sysmodule: devkitPro with devkitA64 and libnx
   (`/opt/devkitpro` by default, or `$DEVKITPRO`).
-- The console: Atmosphère with `enable_am_debug_mode=1` (needed for
-  screenshots; this console has it), sys-ftpd on port 5000.
+- The console: sys-ftpd on port 5000 (anonymous). Screenshots are taken by
+  pressing CAPTURE and fetching the new image from `/Nintendo/Album` over
+  FTP (then deleting it from the card), because sys-botbase's `pixelPeek`
+  is refused on this console (capsrv 0xE0CE: the real DebugModeFlag is off;
+  `enable_am_debug_mode` only fakes it for am). `screenshot.source =
+  "pixelpeek"` selects pixelPeek on consoles where it works.
+- HOME-menu auto-sleep set to Never (System Settings → Sleep Mode).
 
 Run the tool from the checkout as `bin/coldstart <command>` (or
 `python3 -m coldstart` with the checkout on `PYTHONPATH`).
@@ -151,7 +156,11 @@ bin/coldstart supervise
 ```
 
 It pings the rig every 5 s and logs a heartbeat every 10 min while it
-answers. After 60 s of silence it:
+answers. While the rig is silent it clicks ZR every 120 s (keep-awake:
+`supervise.keepawake_s`, `keepawake_button`) so the HOME menu never
+auto-sleeps — sys-botbase cannot wake a sleeping console. ZR does nothing on
+HOME, and nothing is ever sent while the rig answers. After 60 s of silence
+it:
 
 1. runs the launch sequence. An application or hbmenu screen while the rig
    is silent means a deaf slot: HOME suspends it, and on HOME the tool parks
@@ -165,8 +174,9 @@ answers. After 60 s of silence it:
    `NEEDS A HUMAN ...` and keeps pinging every 30 s, so your own launch is
    noticed. After 30 min (`supervise.human_rearm_s`) it tries again.
 
-If the console does not answer at all, or sys-botbase does not answer while
-the console does, it does not retry: it logs one `NEEDS A HUMAN` line with
+If the console is asleep (port 6000 accepts but `getVersion` times out), does
+not answer at all, or sys-botbase does not answer while the console does, it
+does not retry: it logs one `NEEDS A HUMAN` line with
 the next step and resumes by itself as soon as sys-botbase answers again
 (for example after you pressed POWER and the console booted).
 
@@ -188,10 +198,13 @@ Stop the supervisor with Ctrl-C or SIGTERM; it stops the twibd it started.
 
 ## What still needs a human
 
-- **A kernel fatal, a powered-off or sleeping console.** Nothing on the host
-  can press POWER. The supervisor says `NEEDS A HUMAN (console_down)`; after
-  the console is on again (and sys-botbase started at boot, i.e. installed
-  with `--boot`), it resumes by itself.
+- **A sleeping console** (`NEEDS A HUMAN (asleep)`): sys-botbase cannot wake
+  it. Press HOME or POWER; the supervisor resumes by itself. Keep-awake and
+  auto-sleep = Never should prevent this.
+- **A kernel fatal or a powered-off console.** Nothing on the host can press
+  POWER. The supervisor says `NEEDS A HUMAN (console_down)`; after the
+  console is on again (and sys-botbase started at boot, i.e. installed with
+  `--boot`), it resumes by itself.
 - **sys-botbase not running** (`botbase_down`): not installed, installed
   without `--boot`, or crashed. Install with `--boot` and reboot (or, while
   twili still runs, `bin/coldstart start-sysmodule`).
@@ -202,21 +215,25 @@ Stop the supervisor with Ctrl-C or SIGTERM; it stops the twibd it started.
   twili enabled, a process twili cannot terminate).
 - Settings that keep the console reachable — HOME-menu auto-sleep set to
   Never, power, Wi-Fi — are outside this tool.
+- **Captures refused on some screens** count as `unknown`; if the album
+  fills up or sys-ftpd is down, screenshots stop and launches run blind.
 
 ## Development
 
 ```
-make check     # byte-compile, unit + scenario tests (~75 s), shellcheck if installed
+make check     # byte-compile, unit + scenario tests (~3 min), shellcheck if installed
 ```
 
 Everything is tested against `sim/botbase_sim.py`, a fake console speaking
-the sys-botbase subset with HOME / dialog / user-select / game / waiter / close-prompt /
-asleep screens, a fake rig responder, and fake `twib`/`twibd` in `sim/bin`.
+the sys-botbase subset with HOME / dialog / user-select / game / waiter /
+close-prompt / asleep / off screens, a small FTP server over an SD-card
+directory whose album receives CAPTURE images (with a skewable console
+clock), a fake rig responder, and fake `twib`/`twibd` in `sim/bin`.
 To try the tool by hand without a console:
 
 ```
 python3 sim/botbase_sim.py --botbase-port 16000 --rig-port 15600 --ftp-port 15000 \
-    --ctl-port 16099 --screen dialog --user-select &
+    --ctl-port 16099 --screen dialog &
 PATH=$PWD/sim/bin:$PATH COLDSTART_SIM_CTL=127.0.0.1:16099 COLDSTART_HOST=127.0.0.1 \
     COLDSTART_BOTBASE_PORT=16000 COLDSTART_RIG_PORT=15600 COLDSTART_FTP_PORT=15000 \
     COLDSTART_TWILI_PORT=15000 bin/coldstart launch
