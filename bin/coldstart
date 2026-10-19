@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Run the coldstart tool from a checkout: bin/coldstart <command> ...
+# (equivalent to `python3 -m coldstart` with the repository on PYTHONPATH)
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${here}${PYTHONPATH:+:${PYTHONPATH}}"
+exec "${PYTHON:-python3}" -m coldstart "$@"
