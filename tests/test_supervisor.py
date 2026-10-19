@@ -3,7 +3,8 @@ import io
 import unittest
 
 from coldstart import config, rig
-from coldstart.launch import BOTBASE_DOWN, LAUNCH_FAILED, LaunchFailure, LaunchResult
+from coldstart.botbase import BotbaseError
+from coldstart.launch import ASLEEP, BOTBASE_DOWN, LAUNCH_FAILED, LaunchFailure, LaunchResult
 from coldstart.runlog import NullLog
 from coldstart.supervisor import BACKOFF, HUMAN, WATCH, Supervisor
 from coldstart.twili import Process, TwiliUnavailable
@@ -53,7 +54,7 @@ class FakeTwili:
 
 class Harness(Supervisor):
     def __init__(self, outcomes, twili=None, botbase_back=False, **sup):
-        cfg = config.load(None, env={})
+        cfg = config.load(None, env={"COLDSTART_HOST": "192.0.2.1"})  # TEST-NET, never the console
         cfg.supervise._values.update({"poll_s": 5.0, "silent_s": 60.0, "attempts": 3,
                                       "backoff_s": [60.0, 120.0], "human_poll_s": 30.0,
                                       "human_rearm_s": 1800.0, **sup})
@@ -62,6 +63,8 @@ class Harness(Supervisor):
         self.clock_ = Clock()
         self.rig_state = {"up": False}
         self.botbase_back = botbase_back
+        self.keepawake_clicks = []
+        self.keepawake_error = None
         super().__init__(cfg, NullLog(self.out), twili=twili,
                          launcher_factory=lambda: FakeLauncher(outcomes, self.rig_state),
                          clock=self.clock_, sleep=self.clock_.sleep)
@@ -71,6 +74,11 @@ class Harness(Supervisor):
 
     def botbase_answers(self):
         return self.botbase_back
+
+    def keepawake_click(self):          # never a real socket from unit tests
+        self.keepawake_clicks.append(self.clock_.t)
+        if self.keepawake_error:
+            raise BotbaseError(self.keepawake_error)
 
     @property
     def text(self):
@@ -146,6 +154,45 @@ class SupervisorTests(unittest.TestCase):
         h.rig_state["up"] = True
         h.run(max_runtime=1500)
         self.assertEqual(h.text.count("heartbeat"), 3)   # t=0, 600, 1200
+
+
+    def test_keepawake_while_silent_only(self):
+        h = Harness([], silent_s=10_000.0, keepawake_s=120.0)
+        h.run(max_runtime=500)
+        self.assertEqual([t - 1000.0 for t in h.keepawake_clicks], [0.0, 120.0, 240.0, 360.0, 480.0])
+        self.assertIn("keep-awake: click ZR", h.text)
+        h2 = Harness([], keepawake_s=120.0)
+        h2.rig_state["up"] = True                      # the game answers: never
+        h2.run(max_runtime=500)
+        self.assertEqual(h2.keepawake_clicks, [])
+
+    def test_keepawake_disabled_and_errors(self):
+        h = Harness([], silent_s=10_000.0, keepawake_s=0.0)
+        h.run(max_runtime=500)
+        self.assertEqual(h.keepawake_clicks, [])
+        h = Harness([], silent_s=10_000.0)
+        h.keepawake_error = "no reply within 5 s"
+        h.run(max_runtime=130)
+        self.assertEqual(len(h.keepawake_clicks), 2)
+        self.assertIn("keep-awake: could not click ZR (no reply within 5 s)", h.text)
+
+    def test_no_keepawake_while_asleep_and_resume_on_wake(self):
+        h = Harness([LaunchFailure(ASLEEP, "getVersion times out"), "game"])
+        self.assertEqual(h.run(max_runtime=200, exit_on={"human"}), 3)
+        self.assertIn("NEEDS A HUMAN (asleep)", h.text)
+        self.assertIn("press HOME or POWER", h.text)
+        n = len(h.keepawake_clicks)
+        h.run(max_runtime=1000)                         # still asleep: no input at all
+        self.assertEqual(len(h.keepawake_clicks), n)
+        h.botbase_back = True                           # a human pressed HOME
+        self.assertEqual(h.run(max_runtime=200, exit_on={"recovered"}), 0)
+
+    def test_keepawake_button_validation(self):
+        for bad in ("R", "A", "HOME", "CAPTURE", "NOPE"):
+            d = config.load(None, env={})
+            d.data["supervise"]["keepawake_button"] = bad
+            with self.assertRaisesRegex(config.ConfigError, "keepawake_button"):
+                config._validate(d.data)
 
 
 if __name__ == "__main__":

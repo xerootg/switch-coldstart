@@ -101,6 +101,32 @@ screenshot source is therefore pluggable (`screenshot.source`):
 - The simulator serves a minimal FTP server (stdlib) over an SD-card
   directory, and CAPTURE there writes the current screen into the album.
 
+### Spec change 2026-10-19 (field finding): auto-sleep and keep-awake
+
+The console auto-sleeps at the HOME menu about five minutes after boot, and
+sys-botbase cannot wake it: while asleep the console surfaces on the network
+for a few seconds every minute or so, port 6000 even accepts a TCP
+connection, but commands time out. Therefore:
+
+- This state is classified explicitly as `asleep` (sys-botbase accepts the
+  connection but `getVersion` times out; ICMP/TCP flapping) and treated as
+  "needs a human: press HOME or POWER", with the notification, instead of
+  retrying the launch sequence. The supervisor resumes by itself when
+  sys-botbase answers again. A console that refuses everything is still
+  "does not answer at all" (off, or a fatal screen).
+- Keep-awake: while the console is awake and the rig is silent (at HOME, or
+  about to be recovered), the supervisor clicks a harmless button every
+  `supervise.keepawake_s` (default 120 s) so the HOME menu's idle timer never
+  expires. The button is configurable (`supervise.keepawake_button`, default
+  `ZR`, which does nothing on the HOME menu; R, A, HOME and CAPTURE are
+  refused), and `keepawake_s = 0` disables it. No keep-awake input is ever
+  sent while the rig answers (in particular as `game`, which disables
+  auto-sleep itself and must not receive stray input), nor while the console
+  is asleep or down.
+- The owner also sets auto-sleep to Never; keep-awake is the safety net.
+- The simulator distinguishes `asleep` (port 6000 accepts, nothing answers,
+  FTP and rig silent) from `off` (every port refuses).
+
 ## What the tool must do
 
 ### 1. Supervise (`coldstart supervise`)
@@ -210,7 +236,9 @@ A simulator so everything above is tested on the host with no console:
 - A fake rig responder (UDP) and a fake `twib` (a script on PATH) with
   configurable behaviour (process present or not, terminate succeeds or
   fails).
-- Scenario tests that run the real supervisor against the simulator:
+- Scenario tests that run the real supervisor against the simulator
+  (also: asleep → "press HOME or POWER", off → console down, keep-awake
+  while silent and never while the game answers):
   dead process → launched; dialog → dismissed → launched; deaf slot →
   terminated → launched (with twili) and deaf slot → closed from HOME →
   launched (twili disabled); asleep → gives up with the right message; wrong

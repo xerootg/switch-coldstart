@@ -134,10 +134,25 @@ class Scenarios(unittest.TestCase):
         self.assertNotEqual(st["app"]["pid"], old_pid)
         self.assertTrue(any(f"terminate 0x{old_pid:x}" in c for c in sim.twib_calls()))
 
-    def test_asleep_gives_up_with_the_right_message(self):
+    def test_asleep_needs_a_human_to_press_home(self):
+        # port 6000 accepts while asleep but getVersion times out: not retried
         hook = Webhook()
         self.addCleanup(hook.close)
         sim = self.sim("--screen", "asleep", extra={"notify": {"webhook": hook.url}})
+        r = sim.run(*SUPERVISE)
+        out = r.stdout
+        self.assertEqual(r.returncode, 3, out)
+        self.assertIn_("NEEDS A HUMAN (asleep): sys-botbase on 127.0.0.1:", out)
+        self.assertIn_("accepts the connection but getVersion times out", out)
+        self.assertIn_("Next: press HOME or POWER on the console", out)
+        self.assertEqual(out.count("recovery attempt"), 1, "a hard failure is not retried")
+        self.assertEqual([b["kind"] for b in hook.bodies], ["asleep"])
+        self.assertNotIn("keep-awake: click", out.split("NEEDS A HUMAN")[1])
+
+    def test_off_gives_up_with_the_right_message(self):
+        hook = Webhook()
+        self.addCleanup(hook.close)
+        sim = self.sim("--screen", "off", extra={"notify": {"webhook": hook.url}})
         r = sim.run(*SUPERVISE)
         out = r.stdout
         self.assertEqual(r.returncode, 3, out)
@@ -274,8 +289,8 @@ class Scenarios(unittest.TestCase):
         sim = self.sim("--screen", "asleep")
         p = sim.spawn("supervise", "--exit-on", "recovered", "--max-runtime", "40")
         self.addCleanup(stop, p)
-        sim.wait_for_output("NEEDS A HUMAN (console_down)")
-        sim.set(screen="home")                     # a human pressed POWER
+        sim.wait_for_output("NEEDS A HUMAN (asleep)")
+        sim.set(screen="home")                     # a human pressed HOME
         rc = p.wait(timeout=40)
         out = sim.spawn_output()
         self.assertEqual(rc, 0, out)
@@ -302,7 +317,7 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(list(sim.tmp.glob("runs/*/twibd.sock")), [])
 
     def test_sigterm_stops_cleanly_and_reaps_twibd(self):
-        sim = self.sim("--screen", "asleep", extra={"twili": {"enabled": True}})
+        sim = self.sim("--screen", "off", extra={"twili": {"enabled": True}})
         p = sim.spawn("supervise", "--max-runtime", "40")
         self.addCleanup(stop, p)
         sim.wait_for_output("NEEDS A HUMAN (console_down)")
@@ -314,6 +329,30 @@ class Scenarios(unittest.TestCase):
         self.assertFalse(socks[0].exists())
         left = subprocess.run(["pgrep", "-f", str(socks[0])], capture_output=True, text=True)
         self.assertEqual(left.stdout, "")
+
+    def test_keepawake_while_rig_is_silent(self):
+        sim = self.sim("--screen", "home",
+                       extra={"supervise": {"silent_s": 100.0, "keepawake_s": 0.3}})
+        r = sim.run("supervise", "--max-runtime", "1.6")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("keep-awake: click ZR (rig silent", r.stdout)
+        n = sim.state()["events"].count("ZR")
+        self.assertGreaterEqual(n, 3, sim.state()["events"])
+        self.assertEqual(sim.state()["screen"], "home")       # ZR does nothing on HOME
+
+    def test_no_keepawake_while_game_answers(self):
+        sim = self.sim("--screen", "game", extra={"supervise": {"keepawake_s": 0.2}})
+        r = sim.run("supervise", "--max-runtime", "1.5")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertNotIn("keep-awake", r.stdout)
+        self.assertNotIn("ZR", sim.state()["events"])
+
+    def test_launch_on_asleep_console(self):
+        sim = self.sim("--screen", "asleep")
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn_("launch FAILED (asleep)", r.stdout)
+        self.assertIn("ignored while asleep: getVersion", sim.state()["events"])
 
     def test_start_sysmodule_through_twili(self):
         sim = self.sim("--screen", "home", "--no-botbase")

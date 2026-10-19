@@ -8,6 +8,10 @@ States (DESIGN.md has the diagram and the reasoning):
                ok -> WATCH; hard failure -> HUMAN; soft failure -> BACKOFF,
                or HUMAN after `attempts` attempts
     BACKOFF    keep pinging every poll_s until the next attempt is due
+
+While the rig is silent in WATCH, BACKOFF and HUMAN(launch_failed), a
+harmless button (ZR) is clicked every keepawake_s so the HOME menu does not
+auto-sleep; never while the rig answers.
     HUMAN      ping every human_poll_s; rig answers -> WATCH; sys-botbase
                answers again after a hard failure -> RECOVER; human_rearm_s
                after "failed N times" -> RECOVER
@@ -20,7 +24,7 @@ import time
 
 from . import rig
 from .botbase import Botbase, BotbaseError
-from .launch import BOTBASE_DOWN, CONSOLE_DOWN, LAUNCH_FAILED, NEXT_STEP, Launcher, LaunchFailure
+from .launch import HARD, LAUNCH_FAILED, NEXT_STEP, Launcher, LaunchFailure
 from .probe import notify
 from .twili import TwiliError, TwiliUnavailable
 
@@ -51,6 +55,7 @@ class Supervisor:
         self.last_answer: float | None = None
         self.last_role: str | None = None
         self.last_heartbeat = -1e18
+        self.last_keepawake = -1e18
         self.silence_logged = False
         self.deadline: float | None = None
         self.started = clock()
@@ -138,6 +143,7 @@ class Supervisor:
                 self.attempt = 0
                 self._set(WATCH, "launched")
                 return
+        self.last_keepawake = self.clock()   # the launch pressed buttons
         self.log(f"attempt {self.attempt}/{n} failed ({failure.kind}): {failure.message}")
         if failure.hard:
             self.needs_human(failure.kind, failure.message)
@@ -174,6 +180,28 @@ class Supervisor:
             self.log(f"twili: terminated pid 0x{p.pid:x}")
         return None
 
+    def keepawake_click(self) -> None:
+        c = self.cfg
+        with Botbase(c.console.host, c.botbase.port, c.botbase.timeout_s) as bb:
+            bb.get_version()
+            bb.click(self.S.keepawake_button)
+
+    def keepawake(self, now: float) -> None:
+        """While the rig is silent (the console is at HOME, or about to be
+        recovered), click a harmless button every keepawake_s so the HOME
+        menu's idle timer never puts the console to sleep. Only called after
+        a ping got no answer: never while the game (or waiter) answers."""
+        if self.S.keepawake_s <= 0 or now - self.last_keepawake < self.S.keepawake_s:
+            return
+        self.last_keepawake = now
+        btn = self.S.keepawake_button
+        try:
+            self.keepawake_click()
+        except BotbaseError as e:
+            self.log(f"keep-awake: could not click {btn} ({e})")
+            return
+        self.log(f"keep-awake: click {btn} (rig silent; keeps the HOME menu from auto-sleeping)")
+
     # --- loop ------------------------------------------------------------------
 
     def step(self) -> None:
@@ -183,6 +211,8 @@ class Supervisor:
             self.on_answer(reply, now)
             self.wait(self.S.poll_s)
             return
+        if self.state in (WATCH, BACKOFF) or (self.state == HUMAN and self.human_kind == LAUNCH_FAILED):
+            self.keepawake(now)
         if self.state == WATCH:
             since = self.last_answer if self.last_answer is not None else self.started
             silent = now - since
@@ -204,7 +234,7 @@ class Supervisor:
             self.recover()
             return
         if self.state == HUMAN:
-            if self.human_kind in (CONSOLE_DOWN, BOTBASE_DOWN) and self.botbase_answers():
+            if self.human_kind in HARD and self.botbase_answers():
                 self.log("sys-botbase answers again: retrying the launch")
                 self.attempt = 0
                 self._set(RECOVER, "sys-botbase back")

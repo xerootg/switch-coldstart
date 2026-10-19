@@ -20,11 +20,12 @@ FAST = {
     "launch": {"settle_home_s": 0.1, "settle_dpad_s": 0.0, "settle_a_s": 0.3,
                "settle_dialog_s": 0.1, "settle_close_s": 0.2, "wait_rig_s": 2.0, "rig_poll_s": 0.2},
     "supervise": {"poll_s": 0.2, "silent_s": 0.6, "heartbeat_s": 600.0, "attempts": 3,
-                  "backoff_s": [0.3], "human_poll_s": 0.3, "human_rearm_s": 0.0},
+                  "backoff_s": [0.3], "human_poll_s": 0.3, "human_rearm_s": 0.0,
+                  "keepawake_s": 0.0},   # keep-awake has its own scenario tests
     "twili": {"timeout_s": 10.0, "terminate_wait_s": 2.0},
     "rig": {"ping_timeout_s": 0.2},
     "screenshot": {"capture_wait_s": 0.3, "capture_timeout_s": 2.0, "ftp_timeout_s": 5.0},
-    "botbase": {"timeout_s": 3.0, "shot_timeout_s": 5.0},
+    "botbase": {"timeout_s": 1.0, "shot_timeout_s": 5.0},
 }
 
 

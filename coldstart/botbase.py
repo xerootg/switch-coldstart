@@ -31,6 +31,12 @@ class BotbaseUnavailable(BotbaseError):
     """Port 6000 does not answer (refused, timed out, connection dropped)."""
 
 
+class BotbaseTimeout(BotbaseUnavailable):
+    """Connected, but no reply in time: on this console that means asleep
+    (it surfaces on the network briefly and accepts TCP, but sys-botbase's
+    commands time out)."""
+
+
 class CaptureUnavailable(BotbaseError):
     """pixelPeek returned no image."""
 
@@ -84,7 +90,7 @@ class Botbase:
             try:
                 chunk = self.sock.recv(1 << 20)
             except socket.timeout:
-                raise BotbaseUnavailable(f"no reply within {timeout:g} s") from None
+                raise BotbaseTimeout(f"no reply within {timeout:g} s") from None
             except OSError as e:
                 raise BotbaseUnavailable(f"recv: {e}") from None
             if not chunk:

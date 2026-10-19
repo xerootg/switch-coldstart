@@ -6,7 +6,7 @@ import unittest
 from harness import SIM_BIN, Sim
 
 from coldstart import rig
-from coldstart.botbase import Botbase, port_answers
+from coldstart.botbase import Botbase, BotbaseTimeout, port_answers
 
 
 class SimRules(unittest.TestCase):
@@ -83,10 +83,18 @@ class SimRules(unittest.TestCase):
         self.assertTrue(home.startswith(b"\xff\xd8") and game.startswith(b"\xff\xd8"))
         self.assertNotEqual(home, game)
 
-    def test_asleep_closes_ports_and_wakes(self):
-        sim = self.sim("--screen", "asleep")
+    def test_off_closes_ports_asleep_accepts_but_ignores(self):
+        sim = self.sim("--screen", "off")
         self.assertFalse(port_answers("127.0.0.1", sim.ports["botbase"], 0.5))
         self.assertFalse(port_answers("127.0.0.1", sim.ports["ftp"], 0.5))
+        sim.set(screen="asleep")
+        self.assertTrue(port_answers("127.0.0.1", sim.ports["botbase"], 0.5))
+        self.assertFalse(port_answers("127.0.0.1", sim.ports["ftp"], 0.5))
+        b = Botbase("127.0.0.1", sim.ports["botbase"], timeout=0.5)
+        b.connect()
+        self.addCleanup(b.close)
+        with self.assertRaises(BotbaseTimeout):
+            b.get_version()
         sim.set(screen="home")
         self.assertTrue(port_answers("127.0.0.1", sim.ports["botbase"], 0.5))
         self.assertTrue(port_answers("127.0.0.1", sim.ports["ftp"], 0.5))

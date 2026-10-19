@@ -100,6 +100,12 @@ DEFAULTS: dict[str, dict] = {
         # Waits between launch attempts (the last value repeats if short).
         "backoff_s": [60.0, 120.0],
         "human_poll_s": 30.0,
+        # Keep the HOME menu's idle timer from expiring (the console auto-sleeps
+        # at HOME and sys-botbase cannot wake it): while the rig is silent,
+        # click this harmless button every keepawake_s (0 = off). Never sent
+        # while the rig answers (the game disables auto-sleep itself).
+        "keepawake_s": 120.0,
+        "keepawake_button": "ZR",
         # After "launch failed N times": try again after this long (0 = never;
         # a human's launch is noticed either way).
         "human_rearm_s": 1800.0,
@@ -220,6 +226,11 @@ def _validate(data: dict) -> None:
         raise ConfigError('screenshot.source: "album" or "pixelpeek"')
     if data["launch"]["tile"] < 0:
         raise ConfigError("launch.tile: must be >= 0")
+    from .botbase import BUTTONS, NEVER_HOLD  # noqa: PLC0415
+    kb = data["supervise"]["keepawake_button"]
+    if kb not in BUTTONS or kb in NEVER_HOLD or kb in ("A", "HOME", "CAPTURE"):
+        raise ConfigError(f"supervise.keepawake_button: {kb!r} is not a harmless button "
+                          "(default ZR; R, A, HOME and CAPTURE are refused)")
     if data["supervise"]["attempts"] < 1:
         raise ConfigError("supervise.attempts: must be >= 1")
     try:

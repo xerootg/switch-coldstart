@@ -17,14 +17,14 @@ Serves, on 127.0.0.1 by default:
   in sim/bin to read and change the state.
 
 The fake console has screens home / dialog / user-select / game / waiter /
-other / close-prompt / asleep, a cursor on a row of tiles ("app" or "other"), and an optional
+other / close-prompt / asleep / off, a cursor on a row of tiles ("app" or "other"), and an optional
 hbl process. Rules: A on an app tile -> user-select (optional) -> game (or
 waiter); A on an other tile -> other; A on the dialog -> home; HOME from the
 game/waiter/other/user-select -> home (the app stays, suspended); DLEFT/DRIGHT
 move the cursor within bounds; X on HOME with a suspended app -> close-prompt,
 whose A closes the app (-> home, nothing suspended) and whose B/HOME go back;
-asleep closes every TCP port and silences the
-rig. pixelPeek and CAPTURE produce a synthetic JPEG with a distinct colour
+asleep keeps port 6000 accepting but answers nothing (as the real console
+does), closes FTP and silences the rig; off closes every port. pixelPeek and CAPTURE produce a synthetic JPEG with a distinct colour
 layout per screen and a clock in the top bar that changes every second.
 
     botbase_sim.py [--screen home] [--tiles app,app] [--user-select] [--deaf]
@@ -54,7 +54,7 @@ from PIL import Image, ImageDraw
 BUTTONS = set("A B X Y L R ZL ZR PLUS MINUS HOME CAPTURE DUP DDOWN DLEFT DRIGHT "
               "LSTICK RSTICK DL DU DR DD PALMA UNUSED".split())
 ALIASES = {"DL": "DLEFT", "DU": "DUP", "DR": "DRIGHT", "DD": "DDOWN"}
-SCREENS = ("home", "dialog", "user-select", "game", "waiter", "other", "close-prompt", "asleep")
+SCREENS = ("home", "dialog", "user-select", "game", "waiter", "other", "close-prompt", "asleep", "off")
 HBL_TITLE = 0x01007EF00011E000
 BOTBASE_TITLE = "430000000000000B"
 W, H = 1280, 720
@@ -103,7 +103,7 @@ class Console:
                 if k == "screen":
                     if v not in SCREENS:
                         raise ValueError(f"bad screen {v}")
-                    if v == "asleep":
+                    if v in ("asleep", "off"):
                         self.twili_connected = False
                     if v in ("game", "waiter") and self.app is None:
                         self._start_app(started=time.monotonic() - self.boot_delay)
@@ -241,7 +241,7 @@ class Console:
 
 class TcpListener:
     """A listening socket that can be closed and reopened on the same port, so
-    "asleep" and "sysmodule not running" refuse connections like the real thing."""
+    "off" and "sysmodule not running" refuse connections like the real thing."""
 
     def __init__(self, name, host, port, handler):
         self.name, self.host, self.handler = name, host, handler
@@ -514,9 +514,10 @@ class Sim:
 
     def reconcile(self):
         c = self.console
-        awake = c.screen != "asleep"
-        (self.ftp_l.open if awake else self.ftp_l.close)()
-        (self.botbase_l.open if awake and c.botbase else self.botbase_l.close)()
+        # asleep: like the real console, port 6000 still accepts a connection
+        # but nothing answers; off (or a fatal screen): every port refuses.
+        (self.ftp_l.open if c.screen not in ("asleep", "off") else self.ftp_l.close)()
+        (self.botbase_l.open if c.screen != "off" and c.botbase else self.botbase_l.close)()
 
     # -- servers ------------------------------------------------------------
 
@@ -526,6 +527,10 @@ class Sim:
         for raw in f:
             line = raw.decode("ascii", "replace")
             argv = line.replace("\r", " ").replace("\n", " ").split()
+            if c.screen in ("asleep", "off"):
+                with c.lock:
+                    c.events.append("ignored while asleep: " + line.strip())
+                continue
             if not argv:
                 continue
             cmd = argv[0]
@@ -550,7 +555,7 @@ class Sim:
                 out = c.render().hex().upper() if c.capture else ""
             if out is not None:
                 conn.sendall((out + "\n").encode("ascii"))
-            if c.screen == "asleep" or not c.botbase:
+            if c.screen == "off" or not c.botbase:
                 return
 
     def serve_ftp(self, conn):
@@ -600,14 +605,14 @@ class Sim:
             c.set(**req.get("values", {}))
             return c.snapshot()
         if cmd == "connect":
-            if c.screen == "asleep":
+            if c.screen in ("asleep", "off"):
                 raise RuntimeError("device does not answer")
             with c.lock:
                 c.twili_connected = True
             return {}
         if cmd == "ps":
             with c.lock:
-                if c.screen == "asleep" or not c.twili_connected:
+                if c.screen in ("asleep", "off") or not c.twili_connected:
                     return {"devices": 0, "procs": []}
                 procs = [{"pid": 0x83, "tid": 0x420000000000000F, "name": "sys-ftpd"}]
                 if c.botbase:
@@ -616,13 +621,13 @@ class Sim:
                     procs.append({"pid": c.app["pid"], "tid": HBL_TITLE, "name": "hbloader"})
                 return {"devices": 1, "procs": procs}
         if cmd == "terminate":
-            if c.screen == "asleep":
+            if c.screen in ("asleep", "off"):
                 raise RuntimeError("device does not answer")
             if not c.terminate(int(req["pid"])):
                 raise RuntimeError("no such process")
             return {}
         if cmd == "launch":
-            if c.screen == "asleep":
+            if c.screen in ("asleep", "off"):
                 raise RuntimeError("device does not answer")
             if req.get("tid", "").upper().removeprefix("0X") != BOTBASE_TITLE:
                 raise RuntimeError("the sim only launches sys-botbase")

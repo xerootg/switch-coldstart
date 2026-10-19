@@ -20,24 +20,32 @@ import time
 from dataclasses import dataclass
 
 from . import capture, rig
-from .botbase import Botbase, BotbaseError, BotbaseUnavailable, CaptureUnavailable
+from .botbase import (Botbase, BotbaseError, BotbaseTimeout, BotbaseUnavailable,
+                      CaptureUnavailable)
 from .capture import CaptureRefused
 from .classify import Classifier, PillowMissing, Result, UNKNOWN, pillow_available
 from .probe import console_answers
 
 CONSOLE_DOWN = "console_down"
+ASLEEP = "asleep"
 BOTBASE_DOWN = "botbase_down"
 LAUNCH_FAILED = "launch_failed"
 
 NEXT_STEP = {
     CONSOLE_DOWN: ("wake or power on the console (press POWER; hold it ~12 s if a fatal error "
                    "screen is up); the supervisor resumes by itself once sys-botbase answers"),
+    ASLEEP: ("press HOME or POWER on the console to wake it (it auto-sleeps at the HOME menu "
+             "and sys-botbase cannot wake it); set Auto-Sleep to Never; the supervisor resumes "
+             "by itself once sys-botbase answers"),
     BOTBASE_DOWN: ("start sys-botbase: `coldstart start-sysmodule` (through twili, no reboot), or "
                    "install it first with `coldstart install --yes [--boot]`; right after a boot "
                    "it needs ~20 s before it listens"),
     LAUNCH_FAILED: ("look at the screenshots in the run directory and launch the tile by hand; "
                     "the supervisor notices the rig answering and resumes"),
 }
+
+
+HARD = (CONSOLE_DOWN, ASLEEP, BOTBASE_DOWN)
 
 
 class LaunchFailure(Exception):
@@ -49,7 +57,7 @@ class LaunchFailure(Exception):
     @property
     def hard(self) -> bool:
         """Hard failures are not retried: the host cannot fix them."""
-        return self.kind in (CONSOLE_DOWN, BOTBASE_DOWN)
+        return self.kind in HARD
 
     @property
     def next_step(self) -> str:
@@ -164,6 +172,12 @@ class Launcher:
         try:
             self.bb.connect()
             version = self.bb.get_version()
+        except BotbaseTimeout as e:
+            self.close()
+            raise LaunchFailure(
+                ASLEEP,
+                f"sys-botbase on {c.console.host}:{c.botbase.port} accepts the connection but getVersion "
+                f"times out ({e}): the console is asleep") from None
         except BotbaseUnavailable as e:
             self.close()
             answers, how = console_answers(c)

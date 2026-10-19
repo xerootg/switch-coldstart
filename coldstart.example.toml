@@ -64,6 +64,8 @@ heartbeat_s = 600.0
 attempts = 3
 backoff_s = [60.0, 120.0]  # waits between attempts; the last value repeats
 human_poll_s = 30.0
+keepawake_s = 120.0        # while the rig is silent, click keepawake_button this often (0 = off)
+keepawake_button = "ZR"    # does nothing on the HOME menu; never sent while the rig answers
 human_rearm_s = 1800.0     # after "failed N times", try again after this long (0 = never)
 
 [notify]
