@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Fake twibd for the tests: `twibd --unix -P <socket>` binds the socket and
+waits until SIGTERM/SIGINT, then removes it. The fake twib only checks that
+the socket exists; all state lives in botbase_sim."""
+import os
+import signal
+import socket
+import sys
+import threading
+
+
+def main(argv):
+    if "-P" not in argv or argv.index("-P") + 1 >= len(argv):
+        print("usage: twibd --unix -P <socket>", file=sys.stderr)
+        return 2
+    path = argv[argv.index("-P") + 1]
+    if os.path.exists(path):
+        os.unlink(path)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(path)
+    s.listen(4)
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    stop.wait()
+    s.close()
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
