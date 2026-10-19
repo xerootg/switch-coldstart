@@ -25,13 +25,14 @@ as `NN-<step>.jpg`, so a failed night can be read in the morning.
   `python3 -m pip install --user pillow`. Without Pillow the tool still
   starts, `launch` and `supervise` run the "blind" sequence, and `shot` /
   `learn` say clearly what is missing.
-- `twib` and `twibd` (twili's host tools) on `PATH`, or their paths in the
-  config. The tool starts and stops its own `twibd` unless you point
-  `twili.socket` at one you already run.
+- Optional: `twib` and `twibd` (twili's host tools). twili is being removed
+  from the console (it holds 14 MiB of the system pool sys-botbase needs),
+  so the tool does not use it unless `twili.enabled = true`; then it starts
+  and stops its own `twibd` unless you point `twili.socket` at a running one.
 - For building the sysmodule: devkitPro with devkitA64 and libnx
   (`/opt/devkitpro` by default, or `$DEVKITPRO`).
 - The console: Atmosphère with `enable_am_debug_mode=1` (needed for
-  screenshots; this console has it), sys-ftpd on port 5000, twili.
+  screenshots; this console has it), sys-ftpd on port 5000.
 
 Run the tool from the checkout as `bin/coldstart <command>` (or
 `python3 -m coldstart` with the checkout on `PYTHONPATH`).
@@ -74,20 +75,25 @@ Installing a third-party sysmodule is the owner's decision, so `install`
 only prints its plan unless you add `--yes`:
 
 ```
-bin/coldstart install                 # dry run: prints exactly what it would upload
-bin/coldstart install --yes           # upload exefs.nsp to /atmosphere/contents/430000000000000B/
-bin/coldstart start-sysmodule         # start it now through twili (no reboot), check port 6000
+bin/coldstart install --boot          # dry run: prints exactly what it would upload
+bin/coldstart install --yes --boot    # upload exefs.nsp and flags/boot2.flag to
+                                      #   /atmosphere/contents/430000000000000B/
+```
+
+Then reboot the console yourself (with twili's boot flag disabled, so the
+system pool has room for sys-botbase). sys-botbase waits ~20 s after boot
+before it listens; then:
+
+```
 bin/coldstart status                  # "sys-botbase (TCP 6000): version 2.5"
 ```
 
-Without `--boot` nothing makes it start at boot: try it first with
-`start-sysmodule` (it runs `twib launch 430000000000000B none`; sys-botbase
-waits ~20 s before it listens, the command waits up to 90 s). Once it has
-proven itself on this firmware, make it permanent:
+If it does not answer, the console probably could not start it (memory, or
+incompatibility with this firmware): remove the folder below and reboot.
 
-```
-bin/coldstart install --yes --boot    # also writes flags/boot2.flag
-```
+Fallback only, while twili still runs: `install --yes` without `--boot`
+followed by `bin/coldstart start-sysmodule` starts it without a reboot
+(`twib launch 430000000000000B none`, then waits up to 90 s for port 6000).
 
 No local build? `--release` installs the v2.5 release artifact shipped in
 `reference/sys-botbase-2.5/` (a third-party binary) instead.
@@ -108,6 +114,7 @@ and run `learn` with its name:
 | `user-select` | the profile picker ("Select a user") after A on a tile, if it appears on this console |
 | `waiter`      | the rig's waiter running                                             |
 | `game`        | the game running                                                     |
+| `close-prompt`| HOME with the game suspended, then X: the "Close software" prompt (press B afterwards) |
 
 ```
 bin/coldstart learn home
@@ -131,7 +138,9 @@ its top 12 % (`classify.crop`, so the clock does not count). A screen is
 second `home-2` rather than raising the threshold a lot.
 
 Without any references the tool still works, "blind": HOME, HOME, tile, A, A
-(the prototype's sequence) and only the rig's answer decides success.
+(the prototype's sequence) and only the rig's answer decides success. Blind
+mode cannot close a suspended deaf application (it never presses X without
+seeing the screen), so record the references, `close-prompt` included.
 
 ## 4. Run the supervisor
 
@@ -144,10 +153,15 @@ bin/coldstart supervise
 It pings the rig every 5 s and logs a heartbeat every 10 min while it
 answers. After 60 s of silence it:
 
-1. asks twili whether the hbl process still exists; if it does, the slot is
-   "deaf" and it terminates it (twili unreachable: noted, goes on);
-2. runs the launch sequence; on success it goes back to watching;
-3. on failure retries twice more (60 s, then 120 s later), then logs
+1. runs the launch sequence. An application or hbmenu screen while the rig
+   is silent means a deaf slot: HOME suspends it, and on HOME the tool parks
+   the cursor on tile 0 (the suspended application), presses X and, if the
+   "Close software" prompt appears, A to close it. With nothing suspended,
+   X does nothing. Then it selects the tile and presses A. (With
+   `twili.enabled = true` it first asks twili for the hbl process and
+   terminates a deaf one; twili unreachable is noted and ignored.) On
+   success it goes back to watching;
+2. on failure retries twice more (60 s, then 120 s later), then logs
    `NEEDS A HUMAN ...` and keeps pinging every 30 s, so your own launch is
    noticed. After 30 min (`supervise.human_rearm_s`) it tries again.
 
@@ -178,13 +192,14 @@ Stop the supervisor with Ctrl-C or SIGTERM; it stops the twibd it started.
   can press POWER. The supervisor says `NEEDS A HUMAN (console_down)`; after
   the console is on again (and sys-botbase started at boot, i.e. installed
   with `--boot`), it resumes by itself.
-- **sys-botbase not running** (`botbase_down`): not installed, not started
-  since the last reboot without `--boot`, or crashed. Run
-  `bin/coldstart start-sysmodule`.
+- **sys-botbase not running** (`botbase_down`): not installed, installed
+  without `--boot`, or crashed. Install with `--boot` and reboot (or, while
+  twili still runs, `bin/coldstart start-sysmodule`).
 - **The launch failing repeatedly** (`launch_failed`): the screenshots in the
   run directory show where it got stuck (an unexpected dialog, a tile that is
   not the game, a theme change that needs new references).
-- **A process twili cannot terminate.**
+- **An application the HOME menu's close prompt does not close** (or, with
+  twili enabled, a process twili cannot terminate).
 - Settings that keep the console reachable — HOME-menu auto-sleep set to
   Never, power, Wi-Fi — are outside this tool.
 
@@ -195,7 +210,7 @@ make check     # byte-compile, unit + scenario tests (~75 s), shellcheck if inst
 ```
 
 Everything is tested against `sim/botbase_sim.py`, a fake console speaking
-the sys-botbase subset with HOME / dialog / user-select / game / waiter /
+the sys-botbase subset with HOME / dialog / user-select / game / waiter / close-prompt /
 asleep screens, a fake rig responder, and fake `twib`/`twibd` in `sim/bin`.
 To try the tool by hand without a console:
 
