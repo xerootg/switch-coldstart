@@ -1,0 +1,188 @@
+# switch-coldstart — specification
+
+Host-side tooling that brings a homebrew loop on an Atmosphère Switch back
+to life without a human: after the homebrew process died, after a kernel
+fatal that someone cleared with POWER, or after a reboot, the console sits
+at the HOME menu, and this tool presses the buttons from the host, verifies
+what it sees, and hands the console back to the normal iteration rig.
+
+It is the last missing piece of an unattended rig described in
+`reference/RIG-cold-start-excerpt.md`: everything from "the game is
+running" onward already restarts itself; what does not is "nothing is
+running". The tool is used by one developer on one console, but must be
+written as a proper small project: tests, docs, a clean CLI.
+
+## The console and what is already there
+
+- Nintendo Switch, firmware 20.2.0, Atmosphère 1.11.2. LAN address
+  192.168.128.150 (configurable). Services on it today:
+  - sys-ftpd on TCP 5000 (anonymous FTP, the SD card as `/`).
+  - twili's TCP bridge on 15152. The host tool `twib` talks to it through
+    `twibd`: `twibd --unix -P <sock>`, `twib -P <sock> connect-tcp <ip>`,
+    then `twib -P <sock> ps` (a table: `Process ID | Result | Title ID |
+    Process Name | MMU Flags`, ids in hex), `twib -P <sock> terminate
+    <pid>`, `twib -P <sock> reboot`. `twib launch` cannot start
+    applications and storage `host` takes the console down: never use it.
+  - Atmosphère's GDB stub on 22225 (not needed here).
+  - The rig's control port, UDP 5600, answered by whichever rig NRO runs:
+    `ping` → `pong role=game ...` or `pong role=waiter ... hold=<0|1>
+    countdown=<n> crashes=<n>`; `launch` makes the waiter start the game;
+    `auto` re-enables automatic relaunch. No answer within a second means
+    nothing of the rig is running (or the slot is "deaf", see below).
+- hbl is installed with `override_any_app_key=!R`: launching ANY
+  application tile WITHOUT holding R boots the homebrew loader instead of
+  the application, and `sdmc:/hbmenu.nro` is the rig's waiter, which starts
+  the game by itself. So "press A on an application tile" is a complete
+  cold start. Holding R launches the real application; the tool never
+  holds R.
+- sys-botbase (olliz0r/sys-botbase, v2.5, program id 430000000000000B) is
+  the HID-injection sysmodule this tool drives. It is NOT yet installed on
+  the console; installing it is the owner's decision and the owner's
+  action. Its protocol is one TCP connection on port 6000, text commands
+  terminated by `\r\n`; the relevant ones (see `reference/sys-botbase-src/`
+  for the authoritative list and syntax):
+  - `click <BTN>`, `press <BTN>`, `release <BTN>`; buttons A B X Y L R ZL
+    ZR PLUS MINUS HOME CAPTURE DUP DDOWN DLEFT DRIGHT LSTICK RSTICK.
+  - `pixelPeek` → the current screen as a JPEG, hex-encoded, one line
+    (requires Atmosphère's `enable_am_debug_mode`, which this console has).
+  - `getVersion` → the version string.
+  - `configure` subcommands for key sleep/press durations.
+  The sysmodule can be started without a reboot through twili
+  (`twib launch 430000000000000B none`) once its files are on the card, so
+  its firmware compatibility is proven before any `boot2.flag` makes it
+  permanent. `reference/pad.py` is a working prototype client.
+
+## What the tool must do
+
+### 1. Supervise (`coldstart supervise`)
+
+A long-running loop on the host:
+
+1. Poll the rig (UDP ping) every few seconds. While it answers, do nothing
+   but log a heartbeat (rate-limited).
+2. When it has not answered for `silent_s` (default 60 s):
+   - Ask twili whether a homebrew process (the hbl title, default program
+     id 01007ef00011e000, configurable) exists. If it does, the slot is
+     "deaf" (alive but not answering); terminate it with twili, then launch.
+     If twili itself is unreachable, note it and go on with the launch.
+   - Launch (section 2). On success, back to polling. On failure, retry
+     with backoff (configurable, default 3 attempts over ~5 minutes), then
+     declare "needs a human" (section 4) and keep polling at a slow rate
+     so a human's launch is noticed.
+3. Everything the loop does is logged with timestamps to stdout and to a
+   run directory (`runs/<timestamp>/`), including every screenshot taken,
+   named by step, so a failed night can be read in the morning.
+
+### 2. Launch (`coldstart launch`)
+
+The button sequence, with a screenshot and a classification after every
+step that changes the screen:
+
+1. Connect to sys-botbase; `getVersion` as a liveness check. If port 6000
+   does not answer, this is a hard failure: say exactly that (sysmodule
+   not installed, not started, or console asleep/off).
+2. Screenshot, classify (section 3):
+   - error dialog ("The software was closed because an error occurred" or
+     any dialog): click A, screenshot again.
+   - in an application or hbmenu or anything that is not HOME: HOME,
+     settle, screenshot; if still not HOME, HOME again (the first HOME
+     from a running application only suspends it).
+   - HOME: proceed.
+3. On HOME: move the cursor to the configured tile (default: the leftmost
+   application tile, `tile = 0`): DLEFT repeated enough times to be sure
+   (12), then DRIGHT `tile` times, with settle delays; screenshot; click A.
+4. If a user-select screen appears (profile picker), click A once more.
+5. Wait for the rig to answer a ping (default 120 s). Success means `pong`
+   from the waiter or the game. Report which, and how long it took.
+
+Every delay is configurable; defaults should be generous (the HOME menu
+animates). A dry-run flag prints the sequence without touching anything.
+
+### 3. Screen classification (`coldstart shot`, `coldstart learn`)
+
+No OCR. Classify a screenshot by comparing it to reference images the
+owner records once with `coldstart learn <name>` (which takes a screenshot
+and stores it under `refs/<name>.jpg` with an index). The classifier
+downsamples both to a small grid (e.g. 16×9 mean colours) and uses a
+distance with a threshold; it must cope with the HOME menu's clock and
+icons changing, so compare a configurable crop or weight the grid, and
+report the best match plus its distance so thresholds can be tuned from
+the logs. Names the supervisor relies on: `home`, `dialog`, `game`,
+`waiter`, `user-select`; anything else is `unknown`. Without references the
+tool still runs, treats every screen as unknown, and says so.
+
+Pillow may be used for JPEG decoding and the synthetic images in the
+simulator; it is the only third-party dependency allowed, and the tool
+must degrade gracefully (clear error) if it is missing.
+
+### 4. Needs a human
+
+Some states cannot be fixed from the host and the tool must say so plainly
+instead of retrying forever: the console does not answer ICMP/TCP at all
+(asleep, off, or in a fatal screen); sys-botbase does not answer while the
+console does (sysmodule not running); the launch sequence fails N times.
+Each is one clear log line with the next step for the human, and an
+optional webhook/notification (a URL from the config, POST with a JSON
+body; off by default).
+
+### 5. Install helpers (`coldstart install`, `coldstart start-sysmodule`)
+
+- `make sysmodule` clones sys-botbase at a pinned tag/commit into
+  `sysmodule/src` and builds it with devkitPro (the host has devkitA64 and
+  libnx under /opt/devkitpro); output `sysmodule/out/430000000000000B/
+  exefs.nsp`. If devkitPro is missing, say so and stop.
+- `coldstart install` uploads the sysmodule's files to the card over FTP
+  into `/atmosphere/contents/430000000000000B/` and, only with `--boot`,
+  writes `flags/boot2.flag` (start at boot). It prints exactly what it will
+  do and does nothing without `--yes`. `--dry-run` is the default.
+- `coldstart start-sysmodule` runs the twili launch above so the owner can
+  try the sysmodule without a reboot, then checks port 6000.
+
+### 6. Simulator and tests (`make check`)
+
+A simulator so everything above is tested on the host with no console:
+
+- `sim/botbase_sim.py`: a TCP server on a chosen port speaking the
+  sys-botbase protocol subset above, driving a fake console with screens
+  HOME / dialog / user-select / game / waiter / asleep, a cursor on the
+  tile row, and rules: A on a tile → user-select (optional) → the "game"
+  (which then starts a fake rig responder); A on the dialog → HOME; HOME
+  from the game → HOME; DLEFT/DRIGHT move the cursor within bounds.
+  `pixelPeek` returns a synthetic JPEG of the current screen (distinct
+  colours/blocks per screen so the classifier has something to work with).
+- A fake rig responder (UDP) and a fake `twib` (a script on PATH) with
+  configurable behaviour (process present or not, terminate succeeds or
+  fails).
+- Scenario tests that run the real supervisor against the simulator:
+  dead process → launched; dialog → dismissed → launched; deaf slot →
+  terminated → launched; asleep → gives up with the right message; wrong
+  tile → bounded retries; sysmodule missing → hard failure message.
+- Unit tests for the protocol client, the twib output parser, the
+  classifier and the config.
+
+`make check` runs byte-compilation, the unit and scenario tests, and
+`shellcheck` on any shell script if shellcheck is installed. It must pass
+before every commit.
+
+## Non-goals
+
+No OCR, no machine learning, no GUI, no daemonisation beyond "run it in
+tmux", no support for consoles without sys-botbase, no reimplementation of
+the rig (it is reached only through its UDP port).
+
+## Rules for the builder
+
+- Work on `main`, commit directly, small focused commits, each one leaving
+  the tree in a state where `make check` passes. Never commit code that
+  does not work.
+- Python 3.12+, standard library plus Pillow only. Shell scripts POSIX-ish
+  bash, shellcheck-clean.
+- Never touch the real console from this project's development: no FTP
+  writes, no twili commands, no connections to port 6000. The simulator is
+  the only target until the owner installs the sysmodule and runs it.
+  Reading `reference/` is fine; it is all local.
+- Commit messages explain the why; they end with the two attribution lines
+  the builder was given.
+- Write the README for the owner: what this is, how to build the
+  sysmodule, how to install it (and that it is their call), how to record
+  references, how to run the supervisor, what still needs a human.
