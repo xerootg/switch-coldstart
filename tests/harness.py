@@ -23,6 +23,7 @@ FAST = {
                   "backoff_s": [0.3], "human_poll_s": 0.3, "human_rearm_s": 0.0},
     "twili": {"timeout_s": 10.0, "terminate_wait_s": 2.0},
     "rig": {"ping_timeout_s": 0.2},
+    "screenshot": {"capture_wait_s": 0.3, "capture_timeout_s": 2.0, "ftp_timeout_s": 5.0},
     "botbase": {"timeout_s": 3.0, "shot_timeout_s": 5.0},
 }
 
@@ -53,10 +54,13 @@ class Sim:
                  env: dict | None = None):
         self.tmp = Path(tempfile.mkdtemp(prefix="coldstart-test-"))
         self.ports_file = self.tmp / "ports.json"
+        self.sd = self.tmp / "sd"
+        self.sd.mkdir()
         self.sim_log = open(self.tmp / "sim.log", "w")
         self.proc = subprocess.Popen(
             [sys.executable, str(SIM), "--botbase-port", "0", "--rig-port", "0", "--ftp-port", "0",
-             "--ctl-port", "0", "--boot-delay", "0.2", "--ports-file", str(self.ports_file), *sim_args],
+             "--ctl-port", "0", "--boot-delay", "0.2", "--ports-file", str(self.ports_file),
+             "--sd-dir", str(self.sd), *sim_args],
             stdin=subprocess.DEVNULL, stdout=self.sim_log, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + 10
         while not self.ports_file.exists():
@@ -105,6 +109,9 @@ class Sim:
 
     def set(self, **values) -> dict:
         return self.ctl(cmd="set", values=values)
+
+    def album(self) -> list[Path]:
+        return sorted((self.sd / "Nintendo" / "Album").rglob("*.jpg"))
 
     def twib_calls(self) -> list[str]:
         p = self.tmp / "twib.log"

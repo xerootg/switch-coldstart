@@ -8,8 +8,11 @@ Serves, on 127.0.0.1 by default:
   pressed as A, exactly like sys-botbase;
 - a fake rig control port (UDP, default 5600) answering ``ping`` while the
   game or waiter is in the foreground (and not "deaf");
-- a stand-in for sys-ftpd (TCP, default 5000; a greeting only) so "the console
-  answers TCP" can be told apart from "sys-botbase answers";
+- a minimal FTP server standing in for sys-ftpd (TCP, default 5000) over an
+  SD-card directory: the album lives in Nintendo/Album/YYYY/MM/DD/ and CAPTURE
+  saves the current screen there as YYYYMMDDHHMMSSff-<hex>.jpg (by the
+  console's clock, which --clock-offset-s can skew); it also lets "the
+  console answers TCP" be told apart from "sys-botbase answers";
 - a control port (TCP, JSON lines) used by the tests and by the fake ``twib``
   in sim/bin to read and change the state.
 
@@ -21,12 +24,14 @@ game/waiter/other/user-select -> home (the app stays, suspended); DLEFT/DRIGHT
 move the cursor within bounds; X on HOME with a suspended app -> close-prompt,
 whose A closes the app (-> home, nothing suspended) and whose B/HOME go back;
 asleep closes every TCP port and silences the
-rig. pixelPeek returns a synthetic JPEG with a distinct colour layout per
-screen and a clock in the top bar that changes every second.
+rig. pixelPeek and CAPTURE produce a synthetic JPEG with a distinct colour
+layout per screen and a clock in the top bar that changes every second.
 
     botbase_sim.py [--screen home] [--tiles app,app] [--user-select] [--deaf]
                    [--land game|waiter] [--no-botbase] [--no-capture]
                    [--boot-delay S] [--ports-file F] [--<name>-port N]
+                   [--sd-dir D] [--clock-offset-s S] [--album-seed T ...]
+                   [--capture-refuse screen,...] [--capture-delay S]
 
 Port 0 picks a free port; --ports-file receives the chosen ports as JSON.
 """
@@ -38,7 +43,9 @@ import json
 import os
 import signal
 import socket
+import shutil
 import sys
+import tempfile
 import threading
 import time
 
@@ -76,6 +83,7 @@ class Console:
         self.events = []           # every button and notable event, for the tests
         self.held = set()
         self.on_change = lambda: None
+        self.on_capture = lambda: None
         if self.screen in ("game", "waiter"):
             self._start_app(started=time.monotonic() - self.boot_delay)
 
@@ -133,6 +141,8 @@ class Console:
                 if s in ("game", "waiter", "other", "user-select", "close-prompt"):
                     self.screen = "home"
                     self.pending_launch = False
+            elif btn == "CAPTURE":
+                self.on_capture()
             elif btn == "X":
                 if s == "home" and self.app is not None:
                     self.screen = "close-prompt"
@@ -288,10 +298,187 @@ class TcpListener:
                 pass
 
 
+class FtpSession:
+    """Just enough of an FTP server (passive mode) for ftplib against the SD
+    card directory: USER PASS SYST TYPE PWD CWD PASV NLST LIST RETR STOR DELE
+    MKD SIZE QUIT. NLST returns full paths, like sys-ftpd."""
+
+    def __init__(self, conn, root, host):
+        self.conn, self.root, self.host = conn, os.path.realpath(root), host
+        self.cwd = "/"
+        self.pasv = None
+
+    def reply(self, text):
+        self.conn.sendall((text + "\r\n").encode())
+
+    def local(self, path):
+        virt = os.path.normpath(os.path.join(self.cwd, path or "."))
+        if not virt.startswith("/"):
+            virt = "/" + virt
+        real = os.path.realpath(self.root + virt)
+        if real != self.root and not real.startswith(self.root + os.sep):
+            return virt, None
+        return virt, real
+
+    def data(self):
+        if self.pasv is None:
+            self.reply("425 use PASV first")
+            return None
+        self.pasv.settimeout(5)
+        try:
+            d, _ = self.pasv.accept()
+        finally:
+            self.pasv.close()
+            self.pasv = None
+        return d
+
+    def run(self):
+        self.reply("220 botbase_sim sys-ftpd stand-in")
+        f = self.conn.makefile("rb")
+        for raw in f:
+            cmd, _, arg = raw.decode("utf-8", "replace").rstrip("\r\n").partition(" ")
+            cmd = cmd.upper()
+            if cmd == "QUIT":
+                self.reply("221 bye")
+                return
+            handler = getattr(self, "do_" + cmd, None)
+            if handler is None:
+                self.reply(f"502 {cmd} not implemented")
+            else:
+                handler(arg)
+
+    def do_USER(self, arg):
+        self.reply("331 any password")
+
+    def do_PASS(self, arg):
+        self.reply("230 logged in")
+
+    def do_SYST(self, arg):
+        self.reply("215 UNIX Type: L8")
+
+    def do_TYPE(self, arg):
+        self.reply("200 type set")
+
+    def do_PWD(self, arg):
+        self.reply(f'257 "{self.cwd}"')
+
+    def do_CWD(self, arg):
+        virt, real = self.local(arg)
+        if real and os.path.isdir(real):
+            self.cwd = virt
+            self.reply("250 ok")
+        else:
+            self.reply("550 no such directory")
+
+    def do_PASV(self, arg):
+        s = socket.socket()
+        s.bind((self.host, 0))
+        s.listen(1)
+        self.pasv = s
+        port = s.getsockname()[1]
+        h = self.host.replace(".", ",")
+        self.reply(f"227 Entering Passive Mode ({h},{port >> 8},{port & 255})")
+
+    def _listing(self, arg, long):
+        virt, real = self.local(arg)
+        if not real or not os.path.isdir(real):
+            self.reply("550 no such directory")
+            return
+        names = sorted(os.listdir(real))
+        if long:
+            lines = [("d" if os.path.isdir(os.path.join(real, n)) else "-")
+                     + f"rw-r--r-- 1 0 0 {os.path.getsize(os.path.join(real, n))} Jan 1 00:00 {n}"
+                     for n in names]
+        else:
+            lines = [virt.rstrip("/") + "/" + n for n in names]
+        d = self.data()
+        if d is None:
+            return
+        self.reply("150 listing")
+        with d:
+            d.sendall("".join(line + "\r\n" for line in lines).encode())
+        self.reply("226 done")
+
+    def do_NLST(self, arg):
+        self._listing(arg, False)
+
+    def do_LIST(self, arg):
+        self._listing(arg, True)
+
+    def do_RETR(self, arg):
+        _, real = self.local(arg)
+        if not real or not os.path.isfile(real):
+            self.reply("550 no such file")
+            return
+        d = self.data()
+        if d is None:
+            return
+        self.reply("150 sending")
+        with d, open(real, "rb") as fh:
+            d.sendall(fh.read())
+        self.reply("226 done")
+
+    def do_STOR(self, arg):
+        _, real = self.local(arg)
+        if not real or not os.path.isdir(os.path.dirname(real)):
+            self.reply("553 bad path")
+            return
+        d = self.data()
+        if d is None:
+            return
+        self.reply("150 receiving")
+        with d, open(real, "wb") as fh:
+            while True:
+                chunk = d.recv(65536)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        self.reply("226 stored")
+
+    def do_DELE(self, arg):
+        _, real = self.local(arg)
+        if real and os.path.isfile(real):
+            os.unlink(real)
+            self.reply("250 deleted")
+        else:
+            self.reply("550 no such file")
+
+    def do_MKD(self, arg):
+        virt, real = self.local(arg)
+        try:
+            os.mkdir(real)
+            self.reply(f'257 "{virt}" created')
+        except (OSError, TypeError):
+            self.reply("550 cannot create")
+
+    def do_SIZE(self, arg):
+        _, real = self.local(arg)
+        if real and os.path.isfile(real):
+            self.reply(f"213 {os.path.getsize(real)}")
+        else:
+            self.reply("550 no such file")
+
+
+def album_name(t: float, seq: int) -> tuple[str, str]:
+    """(relative directory, file name) the way the console names captures:
+    Nintendo/Album/YYYY/MM/DD/YYYYMMDDHHMMSSff-<32 hex>.jpg"""
+    tm = time.gmtime(t)
+    stamp = time.strftime("%Y%m%d%H%M%S", tm) + f"{int(t * 100) % 100:02d}"
+    d = time.strftime("Nintendo/Album/%Y/%m/%d", tm)
+    return d, f"{stamp}-{seq:032X}.jpg"
+
+
 class Sim:
     def __init__(self, args):
         self.args = args
+        self.sd = args.sd_dir or tempfile.mkdtemp(prefix="botbase-sim-sd-")
+        self.own_sd = args.sd_dir is None
+        os.makedirs(os.path.join(self.sd, "Nintendo", "Album"), exist_ok=True)
+        self.capture_seq = 0
         self.console = Console(args)
+        self.console.on_capture = self.capture
+        for t in args.album_seed:
+            os.replace(*self._write_album(t, self.console.render()))
         self.console.on_change = self.reconcile
         self.botbase_l = TcpListener("botbase", args.host, args.botbase_port, self.serve_botbase)
         self.ftp_l = TcpListener("ftp", args.host, args.ftp_port, self.serve_ftp)
@@ -300,6 +487,26 @@ class Sim:
         self.rig.bind((args.host, args.rig_port))
         threading.Thread(target=self.serve_rig, daemon=True).start()
         self.reconcile()
+
+    def _write_album(self, t, jpeg):
+        self.capture_seq += 1
+        d, name = album_name(t, self.capture_seq)
+        full = os.path.join(self.sd, d)
+        os.makedirs(full, exist_ok=True)
+        tmp = os.path.join(self.sd, f".{name}.part")
+        with open(tmp, "wb") as fh:
+            fh.write(jpeg)
+        return tmp, os.path.join(full, name)
+
+    def capture(self):
+        """CAPTURE: the console saves a JPEG into the album a moment later
+        (or not at all on screens that refuse captures)."""
+        c = self.console
+        if c.screen in self.args.capture_refuse:
+            c.events.append("capture refused")
+            return
+        tmp, final = self._write_album(time.time() + self.args.clock_offset_s, c.render())
+        threading.Timer(self.args.capture_delay, os.replace, (tmp, final)).start()
 
     def ports(self):
         return {"botbase": self.botbase_l.port, "ftp": self.ftp_l.port,
@@ -347,12 +554,7 @@ class Sim:
                 return
 
     def serve_ftp(self, conn):
-        conn.sendall(b"220 botbase_sim ftp stand-in\r\n")
-        conn.settimeout(2.0)
-        try:
-            conn.recv(1024)
-        except OSError:
-            pass
+        FtpSession(conn, self.sd, self.args.host).run()
 
     def serve_rig(self):
         while True:
@@ -452,6 +654,15 @@ def parse_args(argv):
     p.add_argument("--no-botbase", action="store_true", help="sys-botbase not running")
     p.add_argument("--no-capture", action="store_true", help="pixelPeek returns an empty line")
     p.add_argument("--boot-delay", type=float, default=0.5)
+    p.add_argument("--sd-dir", help="SD card root served over FTP (default: a temporary directory)")
+    p.add_argument("--clock-offset-s", type=float, default=0.0,
+                   help="the console clock's offset from the host's (album file names)")
+    p.add_argument("--album-seed", type=float, nargs="*", default=[],
+                   help="epoch times of album images present at start")
+    p.add_argument("--capture-refuse", default="", type=lambda s: [x for x in s.split(",") if x],
+                   help="screens on which CAPTURE saves nothing")
+    p.add_argument("--capture-delay", type=float, default=0.2,
+                   help="seconds before a capture appears in the album")
     a = p.parse_args(argv)
     if any(t not in ("app", "other") for t in a.tiles):
         p.error("--tiles: comma-separated app/other")
@@ -475,6 +686,8 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     stop.wait()
+    if sim.own_sd:
+        shutil.rmtree(sim.sd, ignore_errors=True)
     log("stopped")
     return 0
 

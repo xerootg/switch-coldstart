@@ -89,7 +89,7 @@ class Scenarios(unittest.TestCase):
         self.assertIn_("after-close.jpg: home", out)
         self.assertIn_("recovered: rig answers as game", out)
         st = sim.state()
-        ev = [e for e in st["events"] if not e.startswith("set ")]
+        ev = [e for e in st["events"] if not e.startswith("set ") and e != "CAPTURE"]
         self.assertEqual(ev[0], "HOME")
         self.assertIn(f"closed 0x{old_pid:x}", ev)
         i = ev.index("X")
@@ -116,7 +116,7 @@ class Scenarios(unittest.TestCase):
         self.assertIn_("shot 01-screen-0.jpg: dialog", out)
         self.assertIn_("shot 02-screen-1.jpg: home", out)
         self.assertIn_("recovered: rig answers as game", out)
-        ev = [e for e in sim.state()["events"] if not e.startswith("set ")]
+        ev = [e for e in sim.state()["events"] if not e.startswith("set ") and e != "CAPTURE"]
         self.assertEqual(ev[0], "A", ev)          # the dialog's A comes first
         self.assertNotIn("HOME", ev)              # nothing else was needed
 
@@ -197,11 +197,49 @@ class Scenarios(unittest.TestCase):
         self.assertIn_("ok: rig answers as game", r.stdout)
 
     def test_no_capture_falls_back_to_blind(self):
-        sim = self.sim("--screen", "home", "--no-capture")
+        sim = self.sim("--screen", "home", "--no-capture",
+                       extra={"screenshot": {"source": "pixelpeek"}})
         r = sim.run("launch")
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn_("enable_am_debug_mode", r.stdout)
+        self.assertIn_("pixelPeek unsupported on this console", r.stdout)
         self.assertIn_("continuing blind", r.stdout)
+
+    def test_pixelpeek_source_when_it_works(self):
+        sim = self.sim("--screen", "dialog", extra={"screenshot": {"source": "pixelpeek"}})
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("screen-0.jpg: dialog", r.stdout)
+        self.assertNotIn("CAPTURE", sim.state()["events"])
+        self.assertEqual(sim.album(), [])
+
+    def test_album_capture_is_fetched_and_deleted(self):
+        # the console clock is decades off and an old 2051 image sorts after everything
+        sim = self.sim("--screen", "dialog", "--clock-offset-s", "-40000000",
+                       "--album-seed", "2556143999")
+        seeded = sim.album()
+        self.assertEqual(len(seeded), 1)
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("screen-0.jpg: dialog", r.stdout)
+        self.assertIn_("sorts after the new image (console clock jumped)", r.stdout)
+        self.assertIn("CAPTURE", sim.state()["events"])
+        self.assertEqual(sim.album(), seeded)          # ours deleted, the old one kept
+
+    def test_album_capture_kept_when_delete_off(self):
+        sim = self.sim("--screen", "home", extra={"screenshot": {"delete_after": False}})
+        r = sim.run("shot")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_(": home (nearest home", r.stdout)
+        self.assertEqual(len(sim.album()), 1)
+
+    def test_refused_capture_counts_as_unknown(self):
+        sim = self.sim("--screen", "dialog", "--capture-refuse", "dialog")
+        r = sim.run("launch")
+        self.assertIn_("shot screen-0: unknown (no new album image", r.stdout)
+        self.assertIn("capture refused", sim.state()["events"])
+        # unknown -> HOME; the dialog stays up, so HOME is never reached: soft failure
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn_("could not reach the HOME menu", r.stdout)
 
     def test_dry_run_touches_nothing(self):
         sim = self.sim("--screen", "home")
@@ -209,14 +247,14 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn_("click DRIGHT x2", r.stdout)
         self.assertIn_("never: press/hold R", r.stdout)
-        self.assertEqual([e for e in sim.state()["events"] if not e.startswith("set ")], [])
+        self.assertEqual([e for e in sim.state()["events"] if not e.startswith("set ") and e != "CAPTURE"], [])
 
     def test_already_answering_rig_is_left_alone(self):
         sim = self.sim("--screen", "game")
         r = sim.run("launch")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn_("rig already answers", r.stdout)
-        self.assertEqual([e for e in sim.state()["events"] if not e.startswith("set ")], [])
+        self.assertEqual([e for e in sim.state()["events"] if not e.startswith("set ") and e != "CAPTURE"], [])
 
     def test_twili_unreachable_goes_on_with_launch(self):
         sim = self.sim("--screen", "home", extra={"twili": {"enabled": True, "twib": "/nonexistent/twib"}})

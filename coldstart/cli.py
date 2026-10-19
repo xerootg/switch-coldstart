@@ -19,7 +19,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import __version__, config, rig
+from . import __version__, capture, config, rig
+from .capture import CaptureRefused
 from .botbase import Botbase, BotbaseError
 from .classify import LABELS, Classifier, PillowMissing, pillow_available
 from .launch import Launcher, LaunchFailure
@@ -117,6 +118,13 @@ def cmd_supervise(cfg, args) -> int:
         log.close()
 
 
+def _take_shot(cfg, log) -> tuple[bytes, str]:
+    with Botbase(cfg.console.host, cfg.botbase.port, cfg.botbase.timeout_s,
+                 cfg.botbase.shot_timeout_s) as bb:
+        bb.get_version()
+        return capture.from_config(cfg, log=log).capture(bb)
+
+
 def cmd_shot(cfg, args) -> int:
     clf = Classifier.from_config(cfg)
     if args.file:
@@ -131,12 +139,11 @@ def cmd_shot(cfg, args) -> int:
         return 0
     log = _runlog(cfg, "shot")
     try:
-        with Botbase(cfg.console.host, cfg.botbase.port, cfg.botbase.timeout_s,
-                     cfg.botbase.shot_timeout_s) as bb:
-            data = bb.pixel_peek()
-    except BotbaseError as e:
+        data, origin = _take_shot(cfg, log.log)
+    except (BotbaseError, CaptureRefused) as e:
         log.log(f"shot FAILED: {e}")
         return EXIT_FAIL
+    log.log(f"captured from {origin}")
     out = Path(args.out) if args.out else log.shot_path("shot")
     out.write_bytes(data)
     try:
@@ -156,10 +163,8 @@ def cmd_learn(cfg, args) -> int:
         data = Path(args.file).read_bytes()
     else:
         try:
-            with Botbase(cfg.console.host, cfg.botbase.port, cfg.botbase.timeout_s,
-                         cfg.botbase.shot_timeout_s) as bb:
-                data = bb.pixel_peek()
-        except BotbaseError as e:
+            data, _ = _take_shot(cfg, lambda m: None)
+        except (BotbaseError, CaptureRefused) as e:
             print(f"learn FAILED: {e}", file=sys.stderr)
             return EXIT_FAIL
     try:

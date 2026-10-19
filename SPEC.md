@@ -46,7 +46,8 @@ written as a proper small project: tests, docs, a clean CLI.
   - `click <BTN>`, `press <BTN>`, `release <BTN>`; buttons A B X Y L R ZL
     ZR PLUS MINUS HOME CAPTURE DUP DDOWN DLEFT DRIGHT LSTICK RSTICK.
   - `pixelPeek` → the current screen as a JPEG, hex-encoded, one line
-    (requires Atmosphère's `enable_am_debug_mode`, which this console has).
+    (needs capsrv's debug capture; it does NOT work on this console, see
+    the album spec change below).
   - `getVersion` → the version string.
   - `configure` subcommands for key sleep/press durations.
   The normal install is the files plus `boot2.flag` and a reboot by the
@@ -74,6 +75,31 @@ twili's boot flag is disabled and sys-botbase starts at boot. Consequences:
   `close-prompt`; the simulator gains that screen (HOME with a suspended
   application, X → close-prompt, A → HOME with nothing suspended, B → back).
 - `coldstart start-sysmodule` (twili launch) is a fallback only.
+
+### Spec change 2026-10-19 (field finding): screenshots come from the album
+
+`pixelPeek` does not work on this console: capsrv refuses the debug capture
+(result 0xE0CE, module 206 capsrv, description 112) because the real set:sys
+DebugModeFlag is false; Atmosphère's `enable_am_debug_mode` only fakes the
+flag for am. Flipping the persistent debug-mode flag is off the table. The
+screenshot source is therefore pluggable (`screenshot.source`):
+
+- `album` (default): click CAPTURE through sys-botbase, wait
+  (`capture_wait_s`, default 2.5 s), find the new JPEG under
+  `/Nintendo/Album/` over FTP (sys-ftpd, port 5000, anonymous), download it,
+  and delete it from the card (`delete_after`, default on). The console's
+  clock is wrong (years 2025/2026/2051 all occur), so the host's date is
+  never used: the year/month/day directories are walked and file names
+  (which start with the console's timestamp, e.g.
+  `/Nintendo/Album/2026/03/02/2026030221455100-3C381EA7....jpg`; sys-ftpd's
+  NLST returns full paths) are compared. The album is listed before CAPTURE
+  and a file that was not there before is required afterwards, so a failed
+  capture is detected instead of re-reading an old image. A refused capture
+  makes the screen `unknown` and is logged.
+- `pixelpeek`: kept for consoles where it works; an empty reply means
+  "unsupported" (the launch then runs blind).
+- The simulator serves a minimal FTP server (stdlib) over an SD-card
+  directory, and CAPTURE there writes the current screen into the album.
 
 ## What the tool must do
 

@@ -18,6 +18,14 @@ timeout_s = 5.0
 shot_timeout_s = 15.0      # pixelPeek is ~0.5 MB of hex
 click_hold_ms = 0          # >0: configure buttonClickSleepTime (sys-botbase default 50 ms)
 
+[screenshot]
+source = "album"           # "album": CAPTURE + fetch from /Nintendo/Album over FTP; "pixelpeek"
+capture_wait_s = 2.5       # after CAPTURE, before looking for the new album file
+capture_timeout_s = 8.0    # no new file by then: capture refused (screen = unknown)
+album_root = "/Nintendo/Album"
+delete_after = true        # delete the captured image from the card after download
+ftp_timeout_s = 10.0
+
 [rig]
 port = 5600
 ping_timeout_s = 1.0

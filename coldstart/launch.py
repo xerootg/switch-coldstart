@@ -19,8 +19,9 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from . import rig
+from . import capture, rig
 from .botbase import Botbase, BotbaseError, BotbaseUnavailable, CaptureUnavailable
+from .capture import CaptureRefused
 from .classify import Classifier, PillowMissing, Result, UNKNOWN, pillow_available
 from .probe import console_answers
 
@@ -72,6 +73,7 @@ class Launcher:
         self.sleep = sleep
         self.bb: Botbase | None = None
         self.blind = False
+        self.source = capture.from_config(cfg, log=self.log)
 
     # --- helpers ---------------------------------------------------------
 
@@ -88,10 +90,14 @@ class Launcher:
 
     def shot(self, step: str) -> Result:
         """Screenshot, save, classify, log one line. Never raises for capture
-        problems: they make the screen ``unknown`` (and the launch blind)."""
+        problems: a refused capture makes the screen ``unknown``; a broken
+        source (no FTP, pixelPeek unsupported) makes the launch blind."""
         assert self.bb is not None
         try:
-            jpeg = self.bb.pixel_peek()
+            jpeg, origin = self.source.capture(self.bb)
+        except CaptureRefused as e:
+            self.log(f"shot {step}: unknown ({e})")
+            return Result(UNKNOWN, None, None, note="capture refused")
         except CaptureUnavailable as e:
             self.log(f"shot {step}: {e}")
             if not self.blind:
@@ -99,7 +105,7 @@ class Launcher:
                 self.blind = True
             return Result(UNKNOWN, None, None, note="no screenshot")
         except BotbaseUnavailable as e:
-            raise LaunchFailure(LAUNCH_FAILED, f"sys-botbase connection lost during pixelPeek: {e}") from None
+            raise LaunchFailure(LAUNCH_FAILED, f"sys-botbase connection lost during the screenshot: {e}") from None
         except BotbaseError as e:
             self.log(f"shot {step}: {e}")
             return Result(UNKNOWN, None, None, note="bad screenshot")
@@ -125,6 +131,7 @@ class Launcher:
             f"connect to sys-botbase {self.cfg.console.host}:{self.cfg.botbase.port}, getVersion",
             *([f"configure buttonClickSleepTime {self.cfg.botbase.click_hold_ms}"]
               if self.cfg.botbase.click_hold_ms > 0 else []),
+            f"(every screenshot: {self._shot_desc()})",
             "screenshot + classify; until HOME (at most "
             f"{L.max_normalize_steps} steps): dialog -> click A (settle {L.settle_dialog_s:g} s), "
             f"anything else -> click HOME (settle {L.settle_home_s:g} s)",
@@ -140,6 +147,14 @@ class Launcher:
             f"ping the rig on UDP {self.cfg.rig.port} every {L.rig_poll_s:g} s for up to {L.wait_rig_s:g} s",
             "never: press/hold R",
         ]
+
+    def _shot_desc(self) -> str:
+        s = self.cfg.screenshot
+        if s.source == "pixelpeek":
+            return "sys-botbase pixelPeek"
+        return (f"click CAPTURE, wait {s.capture_wait_s:g} s, fetch the new image under "
+                f"{s.album_root} over FTP {self.cfg.console.host}:{self.cfg.console.ftp_port}"
+                + (", delete it" if s.delete_after else ""))
 
     # --- the sequence ------------------------------------------------------
 

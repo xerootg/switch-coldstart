@@ -41,6 +41,17 @@ DEFAULTS: dict[str, dict] = {
         # (sys-botbase's own default is 50 ms).
         "click_hold_ms": 0,
     },
+    "screenshot": {
+        # "album": CAPTURE + fetch the new JPEG from the SD card's album over
+        # FTP (works without debug mode). "pixelpeek": sys-botbase pixelPeek
+        # (needs capsrv's debug capture, refused on the rig's console).
+        "source": "album",
+        "capture_wait_s": 2.5,
+        "capture_timeout_s": 8.0,
+        "album_root": "/Nintendo/Album",
+        "delete_after": True,
+        "ftp_timeout_s": 10.0,
+    },
     "rig": {
         "port": 5600,
         "ping_timeout_s": 1.0,
@@ -205,6 +216,8 @@ def _validate(data: dict) -> None:
     c = data["classify"]["crop"]
     if len(c) != 4 or not (0.0 <= c[0] < c[2] <= 1.0 and 0.0 <= c[1] < c[3] <= 1.0):
         raise ConfigError("classify.crop: expected [x0, y0, x1, y1] fractions with x0<x1, y0<y1")
+    if data["screenshot"]["source"] not in ("album", "pixelpeek"):
+        raise ConfigError('screenshot.source: "album" or "pixelpeek"')
     if data["launch"]["tile"] < 0:
         raise ConfigError("launch.tile: must be >= 0")
     if data["supervise"]["attempts"] < 1:
