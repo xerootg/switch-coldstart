@@ -19,10 +19,12 @@ shot_timeout_s = 15.0      # pixelPeek is ~0.5 MB of hex
 click_hold_ms = 0          # >0: configure buttonClickSleepTime (sys-botbase default 50 ms)
 
 [screenshot]
-source = "album"           # "album": CAPTURE + fetch from /Nintendo/Album over FTP; "pixelpeek"
+source = "album"           # "album": CAPTURE + fetch the new image from the album over FTP; "pixelpeek"
 capture_wait_s = 2.5       # after CAPTURE, before looking for the new album file
 capture_timeout_s = 8.0    # no new file by then: capture refused (screen = unknown)
-album_root = "/Nintendo/Album"
+album_root = "auto"        # "auto": /emummc/emummc.ini (read over FTP once) enabled with a
+                           #   nintendo_path -> "/<nintendo_path>/Album" (e.g.
+                           #   /emuMMC/RAW1/Nintendo/Album), else /Nintendo/Album; or a fixed path
 delete_after = true        # delete the captured image from the card after download
 ftp_timeout_s = 10.0
 
@@ -48,6 +50,8 @@ settle_a_s = 3.0           # after A on a tile / on the profile picker
 settle_dialog_s = 2.0      # after A on an error dialog
 settle_close_s = 4.0       # after A on the "Close software" prompt
 max_normalize_steps = 5    # screenshots/presses spent getting to HOME
+blind_second_a = false     # blind only: A again after the tile's A (profile picker). Off: on the
+                           #   "A new update is available" prompt the cursor starts on Download
 wait_rig_s = 120.0
 rig_poll_s = 2.0
 
@@ -56,6 +60,8 @@ refs_dir = "refs"
 grid = [16, 9]             # columns, rows of mean colours
 crop = [0.0, 0.12, 1.0, 1.0]   # x0, y0, x1, y1 fractions; default drops the clock bar
 threshold = 40.0           # nearest reference farther than this -> unknown
+ambiguity_factor = 2.0     # unknown ("ambiguous") if another label's nearest reference is closer
+ambiguity_offset = 3.0     #   than factor x nearest + offset (HOME-menu dialogs look alike); 0, 0 = off
 
 [supervise]
 poll_s = 5.0

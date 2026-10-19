@@ -5,7 +5,8 @@ Commands:
   supervise         watch the rig; relaunch when it stays silent; say when a human is needed
   launch            one launch: HOME -> tile -> A -> wait for the rig (--dry-run prints it)
   shot              screenshot through sys-botbase and classify it (or classify --file)
-  learn NAME        record a reference screen (home, dialog, game, waiter, user-select, close-prompt)
+  learn NAME        record a reference screen (home, dialog, game, waiter, user-select, close-prompt,
+                    update-prompt)
   install           put sys-botbase on the SD card over FTP (prints the plan; acts only with --yes)
   start-sysmodule   fallback: start sys-botbase through twili without a reboot, check port 6000
 
@@ -51,12 +52,26 @@ def cmd_status(cfg, args) -> int:
         print(f"sys-botbase (TCP {cfg.botbase.port}): no answer ({e})")
     ok, how = console_answers(cfg)
     print(f"console {c.host}: " + ("answers, " if ok else "silent, ") + how)
+    _status_album(cfg)
     if not cfg.twili.enabled:
         print("twili: disabled (twili.enabled = false)")
     else:
         _status_twili(cfg)
     _status_refs(cfg)
     return 0
+
+
+def _status_album(cfg) -> None:
+    s = cfg.screenshot
+    if s.source != "album":
+        print(f"album: not used (screenshot.source = {s.source})")
+        return
+    album = capture.FtpAlbum(cfg.console.host, cfg.console.ftp_port, s.album_root, s.ftp_timeout_s)
+    try:
+        root = album.resolve()
+        print(f"album root: {root} ({album.how})")
+    except BotbaseError as e:
+        print(f"album root: unresolved, album_root = {s.album_root!r} ({e})")
 
 
 def _status_twili(cfg) -> None:

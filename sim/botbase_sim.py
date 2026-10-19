@@ -9,7 +9,8 @@ Serves, on 127.0.0.1 by default:
 - a fake rig control port (UDP, default 5600) answering ``ping`` while the
   game or waiter is in the foreground (and not "deaf");
 - a minimal FTP server standing in for sys-ftpd (TCP, default 5000) over an
-  SD-card directory: the album lives in Nintendo/Album/YYYY/MM/DD/ and CAPTURE
+  SD-card directory: the album lives in Nintendo/Album/YYYY/MM/DD/ (with
+  --emummc in emuMMC/RAW1/Nintendo/Album/..., next to /emummc/emummc.ini) and CAPTURE
   saves the current screen there as YYYYMMDDHHMMSSff-<hex>.jpg (by the
   console's clock, which --clock-offset-s can skew); it also lets "the
   console answers TCP" be told apart from "sys-botbase answers";
@@ -17,17 +18,22 @@ Serves, on 127.0.0.1 by default:
   in sim/bin to read and change the state.
 
 The fake console has screens home / dialog / user-select / game / waiter /
-other / close-prompt / asleep / off, a cursor on a row of tiles ("app" or "other"), and an optional
+other / close-prompt / update-prompt / asleep / off, a cursor on a row of tiles ("app" or "other"), and an optional
 hbl process. Rules: A on an app tile -> user-select (optional) -> game (or
 waiter); A on an other tile -> other; A on the dialog -> home; HOME from the
 game/waiter/other/user-select -> home (the app stays, suspended); DLEFT/DRIGHT
 move the cursor within bounds; X on HOME with a suspended app -> close-prompt,
 whose A closes the app (-> home, nothing suspended) and whose B/HOME go back;
+with --update-prompt, A on an app tile first shows update-prompt ("A new
+update is available": Start Software above Cancel and Download, the cursor on
+Download): DUP moves to Start Software, whose A continues the launch; A on
+Download is the update download and ends on the error dialog; B cancels;
 asleep keeps port 6000 accepting but answers nothing (as the real console
 does), closes FTP and silences the rig; off closes every port. pixelPeek and CAPTURE produce a synthetic JPEG with a distinct colour
 layout per screen and a clock in the top bar that changes every second.
 
-    botbase_sim.py [--screen home] [--tiles app,app] [--user-select] [--deaf]
+    botbase_sim.py [--screen home] [--tiles app,app] [--user-select] [--update-prompt]
+                   [--emummc] [--deaf]
                    [--land game|waiter] [--no-botbase] [--no-capture]
                    [--boot-delay S] [--ports-file F] [--<name>-port N]
                    [--sd-dir D] [--clock-offset-s S] [--album-seed T ...]
@@ -54,7 +60,16 @@ from PIL import Image, ImageDraw
 BUTTONS = set("A B X Y L R ZL ZR PLUS MINUS HOME CAPTURE DUP DDOWN DLEFT DRIGHT "
               "LSTICK RSTICK DL DU DR DD PALMA UNUSED".split())
 ALIASES = {"DL": "DLEFT", "DU": "DUP", "DR": "DRIGHT", "DD": "DDOWN"}
-SCREENS = ("home", "dialog", "user-select", "game", "waiter", "other", "close-prompt", "asleep", "off")
+SCREENS = ("home", "dialog", "user-select", "game", "waiter", "other", "close-prompt", "update-prompt",
+           "asleep", "off")
+UPDATE_BUTTONS = ("start", "cancel", "download")
+EMUMMC_INI = """[emummc]
+enabled=1
+sector=0x344d0000
+path=emuMMC/RAW1
+id=0x31574152
+nintendo_path=emuMMC/RAW1/Nintendo
+"""
 HBL_TITLE = 0x01007EF00011E000
 BOTBASE_TITLE = "430000000000000B"
 W, H = 1280, 720
@@ -71,6 +86,9 @@ class Console:
         self.tiles = args.tiles
         self.cursor = 0
         self.user_select = args.user_select
+        self.update_prompt = args.update_prompt
+        self.update_cursor = "download"
+        self.x_screen = ""         # tests: the screen X on HOME shows instead
         self.land = args.land
         self.deaf = args.deaf
         self.botbase = not args.no_botbase
@@ -94,6 +112,7 @@ class Console:
             return {"screen": self.screen, "cursor": self.cursor, "tiles": self.tiles,
                     "app": dict(self.app) if self.app else None, "deaf": self.deaf,
                     "botbase": self.botbase, "capture": self.capture,
+                    "update_cursor": self.update_cursor,
                     "twili_connected": self.twili_connected, "held": sorted(self.held),
                     "events": list(self.events), "rig_role": self.rig_role()}
 
@@ -107,8 +126,15 @@ class Console:
                         self.twili_connected = False
                     if v in ("game", "waiter") and self.app is None:
                         self._start_app(started=time.monotonic() - self.boot_delay)
-                elif k not in ("cursor", "tiles", "user_select", "land", "deaf", "botbase",
-                               "capture", "boot_delay"):
+                    if v == "update-prompt":
+                        self.update_cursor = "download"
+                elif k == "update_cursor" and v not in UPDATE_BUTTONS:
+                    raise ValueError(f"bad update_cursor {v}")
+                elif k == "x_screen" and v not in ("",) + SCREENS:
+                    raise ValueError(f"bad x_screen {v}")
+                elif k not in ("cursor", "tiles", "user_select", "update_prompt", "update_cursor",
+                               "x_screen",
+                               "land", "deaf", "botbase", "capture", "boot_delay"):
                     raise ValueError(f"cannot set {k}")
                 setattr(self, k, v)
                 self.events.append(f"set {k}={v}")
@@ -144,7 +170,9 @@ class Console:
             elif btn == "CAPTURE":
                 self.on_capture()
             elif btn == "X":
-                if s == "home" and self.app is not None:
+                if s == "home" and self.x_screen:
+                    self.screen = self.x_screen      # tests: X shows something unexpected
+                elif s == "home" and self.app is not None:
                     self.screen = "close-prompt"
             elif btn == "A":
                 if s == "dialog":
@@ -158,27 +186,64 @@ class Console:
                     if tile == "app":
                         if self.app is not None and self.cursor == 0:
                             self.screen = self.land          # resume the suspended app
-                        elif self.user_select:
-                            self.screen = "user-select"
+                        elif self.update_prompt:
+                            # "A new update is available": Start Software on
+                            # top, Cancel and Download below; cursor on Download
+                            self.screen = "update-prompt"
+                            self.update_cursor = "download"
                             self.pending_launch = True
                         else:
-                            self.app = None
-                            self._start_app()
+                            self._after_launch_prompts()
                     elif tile is not None:
                         self.screen = "other"
+                elif s == "update-prompt":
+                    choice = self.update_cursor
+                    self.events.append(f"update-prompt {choice}")
+                    if choice == "start":
+                        self._after_launch_prompts()
+                    elif choice == "download":
+                        # the update download; on the rig's console it failed
+                        # with error 2123-0011 ("restart the console")
+                        self.pending_launch = False
+                        self.screen = "dialog"
+                    else:
+                        self.pending_launch = False
+                        self.screen = "home"
                 elif s == "user-select" and self.pending_launch:
                     self.pending_launch = False
                     self.app = None
                     self._start_app()
             elif btn == "B":
-                if s == "close-prompt":
+                if s in ("close-prompt", "update-prompt"):
                     self.screen = "home"
+                    self.pending_launch = False
                 elif s == "user-select":
                     self.screen = "home"
                     self.pending_launch = False
+            elif s == "update-prompt" and btn in ("DUP", "DDOWN", "DLEFT", "DRIGHT"):
+                cur = self.update_cursor
+                if btn == "DUP":
+                    cur = "start"
+                elif btn == "DDOWN" and cur == "start":
+                    cur = "download"
+                elif btn == "DLEFT" and cur == "download":
+                    cur = "cancel"
+                elif btn == "DRIGHT" and cur == "cancel":
+                    cur = "download"
+                self.update_cursor = cur
             elif btn in ("DLEFT", "DRIGHT") and s == "home":
                 step = -1 if btn == "DLEFT" else 1
                 self.cursor = max(0, min(len(self.tiles) - 1, self.cursor + step))
+
+    def _after_launch_prompts(self):
+        """The launch past the update prompt: profile picker or the app."""
+        if self.user_select:
+            self.screen = "user-select"
+            self.pending_launch = True
+        else:
+            self.pending_launch = False
+            self.app = None
+            self._start_app()
 
     def terminate(self, pid):
         with self.lock:
@@ -195,9 +260,10 @@ class Console:
     def render(self) -> bytes:
         with self.lock:
             screen, cursor, tiles = self.screen, self.cursor, list(self.tiles)
+            ucur = self.update_cursor
         im = Image.new("RGB", (W, H))
         d = ImageDraw.Draw(im)
-        if screen in ("home", "dialog", "close-prompt"):
+        if screen in ("home", "dialog", "close-prompt", "update-prompt"):
             d.rectangle((0, 0, W, H), fill=(45, 45, 60))
             # top bar: a "clock" whose colour changes every second
             sec = int(time.time())
@@ -222,6 +288,17 @@ class Console:
                 d.rectangle((240, 160, 1040, 560), fill=(70, 70, 75))
                 d.rectangle((240, 470, 640, 560), fill=(220, 40, 40))
                 d.rectangle((640, 470, 1040, 560), fill=(250, 250, 250))
+            elif screen == "update-prompt":
+                im = Image.blend(im, Image.new("RGB", (W, H), (0, 0, 0)), 0.6)
+                d = ImageDraw.Draw(im)
+                d.rectangle((200, 90, 1080, 640), fill=(40, 110, 70))
+                boxes = {"start": (220, 380, 1060, 470), "cancel": (220, 500, 630, 620),
+                         "download": (650, 500, 1060, 620)}
+                fills = {"start": (240, 240, 240), "cancel": (120, 120, 130), "download": (240, 170, 30)}
+                for k, b in boxes.items():
+                    d.rectangle(b, fill=fills[k])
+                x0, y0, x1, y1 = boxes[ucur]
+                d.rectangle((x0 - 6, y0 - 6, x1 + 6, y1 + 6), outline=(0, 230, 230), width=6)
         elif screen == "user-select":
             d.rectangle((0, 0, W, H), fill=(20, 90, 200))
             for i in range(3):
@@ -334,6 +411,12 @@ class FtpSession:
 
     def run(self):
         self.reply("220 botbase_sim sys-ftpd stand-in")
+        try:
+            self._loop()
+        finally:
+            self.drop_pasv()
+
+    def _loop(self):
         f = self.conn.makefile("rb")
         for raw in f:
             cmd, _, arg = raw.decode("utf-8", "replace").rstrip("\r\n").partition(" ")
@@ -370,7 +453,13 @@ class FtpSession:
         else:
             self.reply("550 no such directory")
 
+    def drop_pasv(self):
+        if self.pasv is not None:
+            self.pasv.close()
+            self.pasv = None
+
     def do_PASV(self, arg):
+        self.drop_pasv()
         s = socket.socket()
         s.bind((self.host, 0))
         s.listen(1)
@@ -382,6 +471,7 @@ class FtpSession:
     def _listing(self, arg, long):
         virt, real = self.local(arg)
         if not real or not os.path.isdir(real):
+            self.drop_pasv()
             self.reply("550 no such directory")
             return
         names = sorted(os.listdir(real))
@@ -408,6 +498,7 @@ class FtpSession:
     def do_RETR(self, arg):
         _, real = self.local(arg)
         if not real or not os.path.isfile(real):
+            self.drop_pasv()
             self.reply("550 no such file")
             return
         d = self.data()
@@ -459,12 +550,12 @@ class FtpSession:
             self.reply("550 no such file")
 
 
-def album_name(t: float, seq: int) -> tuple[str, str]:
+def album_name(t: float, seq: int, album: str = "Nintendo/Album") -> tuple[str, str]:
     """(relative directory, file name) the way the console names captures:
     Nintendo/Album/YYYY/MM/DD/YYYYMMDDHHMMSSff-<32 hex>.jpg"""
     tm = time.gmtime(t)
     stamp = time.strftime("%Y%m%d%H%M%S", tm) + f"{int(t * 100) % 100:02d}"
-    d = time.strftime("Nintendo/Album/%Y/%m/%d", tm)
+    d = album + time.strftime("/%Y/%m/%d", tm)
     return d, f"{stamp}-{seq:032X}.jpg"
 
 
@@ -473,7 +564,14 @@ class Sim:
         self.args = args
         self.sd = args.sd_dir or tempfile.mkdtemp(prefix="botbase-sim-sd-")
         self.own_sd = args.sd_dir is None
-        os.makedirs(os.path.join(self.sd, "Nintendo", "Album"), exist_ok=True)
+        # with --emummc the console's Nintendo folder is redirected, like on
+        # the rig's console, and /emummc/emummc.ini says where
+        self.album = "emuMMC/RAW1/Nintendo/Album" if args.emummc else "Nintendo/Album"
+        if args.emummc:
+            os.makedirs(os.path.join(self.sd, "emummc"), exist_ok=True)
+            with open(os.path.join(self.sd, "emummc", "emummc.ini"), "w") as fh:
+                fh.write(EMUMMC_INI)
+        os.makedirs(os.path.join(self.sd, self.album), exist_ok=True)
         self.capture_seq = 0
         self.console = Console(args)
         self.console.on_capture = self.capture
@@ -490,7 +588,7 @@ class Sim:
 
     def _write_album(self, t, jpeg):
         self.capture_seq += 1
-        d, name = album_name(t, self.capture_seq)
+        d, name = album_name(t, self.capture_seq, self.album)
         full = os.path.join(self.sd, d)
         os.makedirs(full, exist_ok=True)
         tmp = os.path.join(self.sd, f".{name}.part")
@@ -654,6 +752,10 @@ def parse_args(argv):
     p.add_argument("--screen", default="home", choices=SCREENS)
     p.add_argument("--tiles", default="app,app,other", type=lambda s: s.split(","))
     p.add_argument("--user-select", action="store_true")
+    p.add_argument("--update-prompt", action="store_true",
+                   help="A on an app tile first shows 'A new update is available' (cursor on Download)")
+    p.add_argument("--emummc", action="store_true",
+                   help="serve /emummc/emummc.ini and keep the album under /emuMMC/RAW1/Nintendo/Album")
     p.add_argument("--land", default="game", choices=("game", "waiter"))
     p.add_argument("--deaf", action="store_true", help="the app runs but the rig does not answer")
     p.add_argument("--no-botbase", action="store_true", help="sys-botbase not running")

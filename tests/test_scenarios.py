@@ -204,12 +204,92 @@ class Scenarios(unittest.TestCase):
         self.assertNotIn("X", sim.state()["events"])
 
     def test_blind_launch_without_references(self):
-        sim = self.sim("--screen", "home", "--user-select", refs_dir=None)
+        sim = self.sim("--screen", "home", "--user-select", refs_dir=None,
+                       extra={"launch": {"blind_second_a": True}})
         r = sim.run("launch")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn_("every screen is unknown, launching blind", r.stdout)
         self.assertIn_("blind: HOME twice", r.stdout)
         self.assertIn_("ok: rig answers as game", r.stdout)
+
+    def test_blind_has_no_second_a_by_default(self):
+        sim = self.sim("--screen", "home", refs_dir=None)
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("blind: no second A", r.stdout)
+        ev = [e for e in sim.state()["events"] if not e.startswith("set ") and e != "CAPTURE"]
+        self.assertEqual(ev.count("A"), 1, ev)
+
+    # --- the update prompt ("A new update is available"; cursor on Download) --
+
+    def test_update_prompt_goes_up_to_start_software(self):
+        sim = self.sim("--screen", "home", "--update-prompt", "--user-select")
+        r = sim.run("launch")
+        out = r.stdout
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn_("after-a.jpg: update-prompt", out)
+        self.assertIn_("DUP to 'Start Software', then A", out)
+        self.assertIn_("after-update-prompt.jpg: user-select", out)
+        self.assertIn_("ok: rig answers as game", out)
+        st = sim.state()
+        self.assertIn("update-prompt start", st["events"])
+        self.assertNotIn("update-prompt download", st["events"])
+        ev = [e for e in st["events"] if not e.startswith("set ") and e != "CAPTURE"]
+        i = ev.index("DUP")
+        self.assertEqual(ev[i - 1:i + 3], ["A", "DUP", "A", "update-prompt start"], ev)
+
+    def test_update_prompt_without_profile_picker(self):
+        sim = self.sim("--screen", "home", "--update-prompt")
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("after-update-prompt.jpg: game", r.stdout)
+
+    def test_blind_never_downloads_the_update(self):
+        sim = self.sim("--screen", "home", "--update-prompt", refs_dir=None)
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 1, r.stdout)     # no rig: soft failure, not a download
+        self.assertIn_("blind: no second A", r.stdout)
+        st = sim.state()
+        self.assertEqual(st["screen"], "update-prompt")
+        self.assertFalse(any(e.startswith("update-prompt ") for e in st["events"]), st["events"])
+
+    def test_update_prompt_up_at_start_is_cancelled_with_b(self):
+        sim = self.sim("--screen", "update-prompt", "--update-prompt")
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn_("screen-0.jpg: update-prompt", r.stdout)
+        ev = [e for e in sim.state()["events"] if not e.startswith("set ") and e != "CAPTURE"]
+        self.assertEqual(ev[0], "B", ev)
+        self.assertNotIn("update-prompt download", ev)
+
+    def test_x_showing_update_prompt_is_refused(self):
+        sim = self.sim("--screen", "home", "--update-prompt")
+        sim.set(x_screen="update-prompt")
+        r = sim.run("launch")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn_("close-check.jpg: update-prompt", r.stdout)
+        self.assertIn_("not close-prompt or HOME; pressed B, not A", r.stdout)
+        ev = [e for e in sim.state()["events"] if not e.startswith("set ") and e != "CAPTURE"]
+        i = ev.index("X")
+        self.assertEqual(ev[i + 1], "B", ev)
+        self.assertNotIn("A", ev[i:], ev)
+
+    # --- emuMMC ----------------------------------------------------------------
+
+    def test_emummc_album_is_found_automatically(self):
+        sim = self.sim("--screen", "dialog", "--emummc")
+        r = sim.run("launch")
+        out = r.stdout
+        self.assertEqual(r.returncode, 0, out)
+        self.assertEqual(out.count("album root /emuMMC/RAW1/Nintendo/Album (emuMMC enabled"), 1, out)
+        self.assertIn_("screen-0.jpg: dialog", out)
+        self.assertEqual(sim.album(), [])                  # captures fetched and deleted
+        r = sim.run("status")
+        self.assertIn_("album root: /emuMMC/RAW1/Nintendo/Album (emuMMC enabled", r.stdout)
+
+    def test_status_without_emummc_reports_nintendo_album(self):
+        r = self.sim("--screen", "home").run("status")
+        self.assertIn_("album root: /Nintendo/Album (no /emummc/emummc.ini", r.stdout)
 
     def test_no_capture_falls_back_to_blind(self):
         sim = self.sim("--screen", "home", "--no-capture",
@@ -237,6 +317,7 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn_("screen-0.jpg: dialog", r.stdout)
         self.assertIn_("sorts after the new image (console clock jumped)", r.stdout)
+        self.assertEqual(r.stdout.count("console clock jumped"), 1, r.stdout)   # once per process
         self.assertIn("CAPTURE", sim.state()["events"])
         self.assertEqual(sim.album(), seeded)          # ours deleted, the old one kept
 

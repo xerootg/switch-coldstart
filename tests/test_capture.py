@@ -13,7 +13,24 @@ sys.path.insert(0, str(REPO / "sim"))
 import botbase_sim  # noqa: E402
 
 from coldstart.botbase import CaptureUnavailable  # noqa: E402
-from coldstart.capture import AlbumSource, CaptureRefused, FtpAlbum, PixelPeekSource, newest  # noqa: E402
+import ftplib  # noqa: E402
+
+from coldstart import capture  # noqa: E402
+from coldstart.capture import (AlbumSource, CaptureRefused, FtpAlbum, PixelPeekSource,  # noqa: E402
+                               album_root_from_ini, newest)
+
+EMUMMC_INI = """[emummc]
+enabled=1
+sector=0x344d0000
+path=emuMMC/RAW1
+id=0x31574152
+nintendo_path=emuMMC/RAW1/Nintendo
+"""
+
+
+def reset_capture_state():
+    capture._resolved.clear()
+    capture._clock_noted.clear()
 
 JPEG = b"\xff\xd8\xff\xe0fake\xff\xd9"
 
@@ -45,13 +62,14 @@ class FakeBot:
 
 class AlbumOverFtp(unittest.TestCase):
     def setUp(self):
+        reset_capture_state()
         self.sd = Path(tempfile.mkdtemp(prefix="coldstart-sd-"))
         self.addCleanup(shutil.rmtree, self.sd)
         self.album_dir = self.sd / "Nintendo" / "Album"
         self.album_dir.mkdir(parents=True)
         self.srv = FtpServer(str(self.sd))
         self.addCleanup(self.srv.close)
-        self.album = FtpAlbum("127.0.0.1", self.srv.port, timeout=5)
+        self.album = FtpAlbum("127.0.0.1", self.srv.port, timeout=5)   # album_root "auto"
 
     def put(self, name):
         d = self.album_dir / name[0:4] / name[4:6] / name[6:8]
@@ -82,6 +100,51 @@ class AlbumOverFtp(unittest.TestCase):
         self.assertFalse((self.album_dir / "2026/03/02/2026030221455100-3C381EA7.jpg").exists())
         self.assertTrue(any("console clock jumped" in m for m in logs))
         self.assertEqual(len(self.album.list()), 1)
+
+    def test_clock_note_is_logged_once_per_process(self):
+        self.put("2051123123595999-OLD.jpg")
+        bot = FakeBot(self.album_dir, ["2026030221455100-A1.jpg", "2026030221455200-A2.jpg",
+                                       "2026030221455300-A3.jpg"])
+        logs = []
+        for _ in range(2):    # a new source per launch attempt, as the supervisor does
+            src = AlbumSource(FtpAlbum("127.0.0.1", self.srv.port, timeout=5), wait_s=0, timeout_s=1,
+                              log=logs.append, sleep=lambda s: None)
+            src.capture(bot)
+        src.capture(bot)
+        self.assertEqual(sum("console clock jumped" in m for m in logs), 1, logs)
+
+    def test_auto_root_without_emummc_is_nintendo_album(self):
+        logs = []
+        a = FtpAlbum("127.0.0.1", self.srv.port, timeout=5, log=logs.append)
+        self.put("2026030221455100-AA.jpg")
+        self.assertEqual(len(a.list()), 1)
+        self.assertEqual(a.root, "/Nintendo/Album")
+        self.assertEqual(sum("album root /Nintendo/Album" in m for m in logs), 1, logs)
+
+    def test_auto_root_follows_emummc_ini(self):
+        (self.sd / "emummc").mkdir()
+        (self.sd / "emummc" / "emummc.ini").write_text(EMUMMC_INI)
+        emu = self.sd / "emuMMC" / "RAW1" / "Nintendo" / "Album" / "2026" / "03" / "02"
+        emu.mkdir(parents=True)
+        (emu / "2026030221455100-EE.jpg").write_bytes(JPEG)
+        self.put("2026030221455100-SYS.jpg")            # the sysMMC album is not used
+        logs = []
+        a = FtpAlbum("127.0.0.1", self.srv.port, timeout=5, log=logs.append)
+        self.assertEqual(a.list(), {"/emuMMC/RAW1/Nintendo/Album/2026/03/02/2026030221455100-EE.jpg"})
+        self.assertIn("emuMMC enabled", a.how)
+        # resolved once per process: a second album object neither re-reads nor re-logs
+        b = FtpAlbum("127.0.0.1", self.srv.port, timeout=5, log=logs.append)
+        self.assertEqual(b.root, "/emuMMC/RAW1/Nintendo/Album")
+        b.list()
+        self.assertEqual(sum(m.startswith("album root ") for m in logs), 1, logs)
+
+    def test_explicit_root_wins_over_emummc(self):
+        (self.sd / "emummc").mkdir()
+        (self.sd / "emummc" / "emummc.ini").write_text(EMUMMC_INI)
+        self.put("2026030221455100-SYS.jpg")
+        a = FtpAlbum("127.0.0.1", self.srv.port, root="/Nintendo/Album", timeout=5)
+        self.assertEqual(len(a.list()), 1)
+        self.assertEqual(a.how, "configured")
 
     def test_capture_keeps_file_when_delete_off(self):
         bot = FakeBot(self.album_dir, ["2026030221455100-AB.jpg"])
@@ -125,6 +188,110 @@ class BareNamesFTP:
 
     def nlst(self, path):
         return list(self.tree.get(path, []))
+
+
+class FakeFTP:
+    """ftplib.FTP stand-in: a dict of files, optional failure codes."""
+
+    def __init__(self, files=None, retr_error=None, nlst_error=None):
+        self.files = dict(files or {})
+        self.retr_error, self.nlst_error = retr_error, nlst_error
+        self.retrs = 0
+
+    def connect(self, host, port, timeout=None):
+        pass
+
+    def login(self):
+        pass
+
+    def quit(self):
+        pass
+
+    def retrbinary(self, cmd, cb):
+        self.retrs += 1
+        path = cmd.split(" ", 1)[1]
+        if self.retr_error:
+            raise self.retr_error
+        if path not in self.files:
+            raise ftplib.error_perm("550 no such file")
+        cb(self.files[path].encode())
+
+    def nlst(self, path):
+        if self.nlst_error:
+            raise self.nlst_error
+        pre = path.rstrip("/") + "/"
+        return sorted({pre + p[len(pre):].split("/")[0] for p in self.files if p.startswith(pre)})
+
+
+class AutoRoot(unittest.TestCase):
+    def setUp(self):
+        reset_capture_state()
+
+    def album(self, ftp, **kw):
+        logs = []
+        return FtpAlbum("h", 1, ftp_factory=lambda: ftp, log=logs.append, **kw), logs
+
+    def test_ini_parsing(self):
+        self.assertEqual(album_root_from_ini(EMUMMC_INI)[0], "/emuMMC/RAW1/Nintendo/Album")
+        self.assertEqual(album_root_from_ini(None)[0], "/Nintendo/Album")
+        self.assertEqual(album_root_from_ini(EMUMMC_INI.replace("enabled=1", "enabled=0"))[0],
+                         "/Nintendo/Album")
+        self.assertEqual(album_root_from_ini(EMUMMC_INI.replace("enabled=1", "enabled=0x2"))[0],
+                         "/emuMMC/RAW1/Nintendo/Album")       # any nonzero
+        self.assertEqual(album_root_from_ini(EMUMMC_INI.replace("enabled=1", "enabled=yes"))[0],
+                         "/Nintendo/Album")
+        self.assertEqual(album_root_from_ini(
+            EMUMMC_INI.replace("nintendo_path=emuMMC/RAW1/Nintendo", "nintendo_path=/emu/N/"))[0],
+            "/emu/N/Album")
+        no_path = album_root_from_ini(EMUMMC_INI.replace("nintendo_path=emuMMC/RAW1/Nintendo\n", ""))
+        self.assertEqual(no_path[0], "/Nintendo/Album")
+        self.assertIn("no nintendo_path", no_path[1])
+        self.assertEqual(album_root_from_ini("garbage without a section")[0], "/Nintendo/Album")
+        self.assertEqual(album_root_from_ini("[other]\nx=1\n")[0], "/Nintendo/Album")
+
+    def test_resolves_once_and_logs_once(self):
+        ftp = FakeFTP({"/emummc/emummc.ini": EMUMMC_INI})
+        a, logs = self.album(ftp)
+        self.assertIsNone(a.root)
+        self.assertEqual(a.resolve(), "/emuMMC/RAW1/Nintendo/Album")
+        self.assertEqual(a.resolve(), "/emuMMC/RAW1/Nintendo/Album")
+        b, logs_b = self.album(ftp)
+        self.assertEqual(b.resolve(), "/emuMMC/RAW1/Nintendo/Album")
+        self.assertEqual(ftp.retrs, 1)
+        self.assertEqual(logs, ["album root /emuMMC/RAW1/Nintendo/Album "
+                                "(emuMMC enabled, nintendo_path=emuMMC/RAW1/Nintendo in /emummc/emummc.ini)"])
+        self.assertEqual(logs_b, [])
+
+    def test_missing_ini_is_sysmmc(self):
+        a, logs = self.album(FakeFTP({}))
+        self.assertEqual(a.resolve(), "/Nintendo/Album")
+        self.assertIn("no /emummc/emummc.ini", logs[0])
+
+    def test_temporary_error_on_a_listed_ini_is_not_cached(self):
+        ftp = FakeFTP({"/emummc/emummc.ini": EMUMMC_INI}, retr_error=ftplib.error_temp("450 busy"))
+        a, logs = self.album(ftp)
+        with self.assertRaisesRegex(CaptureUnavailable, "emummc.ini"):
+            a.resolve()
+        self.assertIsNone(a.root)
+        ftp.retr_error = None
+        self.assertEqual(a.resolve(), "/emuMMC/RAW1/Nintendo/Album")
+
+    def test_450_for_a_missing_ini_is_sysmmc(self):
+        a, _ = self.album(FakeFTP({}, retr_error=ftplib.error_temp("450 cannot open")))
+        self.assertEqual(a.resolve(), "/Nintendo/Album")
+
+    def test_connection_failure_is_unavailable_not_cached(self):
+        a, _ = self.album(FakeFTP({}, retr_error=OSError("reset")))
+        with self.assertRaisesRegex(CaptureUnavailable, "emummc.ini"):
+            a.resolve()
+        self.assertEqual(capture._resolved, {})
+
+    def test_explicit_root_never_reads_the_ini(self):
+        ftp = FakeFTP({"/emummc/emummc.ini": EMUMMC_INI})
+        a, logs = self.album(ftp, root="/Custom/Album")
+        self.assertEqual(a.resolve(), "/Custom/Album")
+        self.assertEqual(ftp.retrs, 0)
+        self.assertEqual(logs, [])
 
 
 class Misc(unittest.TestCase):

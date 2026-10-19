@@ -7,12 +7,16 @@
     3. DLEFT x dleft_presses (the suspended application, if any, is tile 0),
        X: "Close software" prompt -> A closes it (works without twili)
     4. DRIGHT x tile, screenshot, A
-    5. user-select -> A
-    6. wait for the rig to answer a ping
+    5. update-prompt ("A new update is available", cursor on Download) ->
+       DUP (to "Start Software"), A; never A alone
+    6. user-select -> A
+    7. wait for the rig to answer a ping
 
 Without references (or without Pillow, or when pixelPeek returns nothing) the
 screens cannot be told apart, so the sequence runs "blind": HOME, HOME, tile,
-A, A -- the prototype's sequence -- and only the rig's answer decides.
+A -- and only the rig's answer decides. The prototype's second blind A (for
+a profile picker) is off by default (``launch.blind_second_a``): on the
+update prompt it would press Download.
 """
 from __future__ import annotations
 
@@ -142,6 +146,7 @@ class Launcher:
             f"(every screenshot: {self._shot_desc()})",
             "screenshot + classify; until HOME (at most "
             f"{L.max_normalize_steps} steps): dialog -> click A (settle {L.settle_dialog_s:g} s), "
+            f"update-prompt -> click B (settle {L.settle_dialog_s:g} s), "
             f"anything else -> click HOME (settle {L.settle_home_s:g} s)",
             "  (blind, without references: click HOME, click HOME)",
             f"click DLEFT x{L.dleft_presses} (settle {L.settle_dpad_s:g} s each)",
@@ -151,7 +156,13 @@ class Launcher:
             f"click DRIGHT x{tile} (settle {L.settle_dpad_s:g} s each)",
             "screenshot",
             f"click A (settle {L.settle_a_s:g} s), screenshot",
-            f"if user-select (blind: always): click A (settle {L.settle_a_s:g} s)",
+            f"if update-prompt: click DUP (settle {L.settle_dpad_s:g} s) to 'Start Software', "
+            f"click A (settle {L.settle_a_s:g} s), screenshot (never A alone: that is Download)",
+            f"if user-select: click A (settle {L.settle_a_s:g} s)",
+            ("  (blind: click A once more for a profile picker -- launch.blind_second_a = true)"
+             if L.blind_second_a else
+             "  (blind: no second A -- it would press Download on an update prompt; "
+             "launch.blind_second_a)"),
             f"ping the rig on UDP {self.cfg.rig.port} every {L.rig_poll_s:g} s for up to {L.wait_rig_s:g} s",
             "never: press/hold R",
         ]
@@ -160,8 +171,11 @@ class Launcher:
         s = self.cfg.screenshot
         if s.source == "pixelpeek":
             return "sys-botbase pixelPeek"
+        root = (s.album_root if s.album_root != capture.AUTO else
+                "the album (auto: /emummc/emummc.ini's nintendo_path if emuMMC is enabled, "
+                "else /Nintendo/Album)")
         return (f"click CAPTURE, wait {s.capture_wait_s:g} s, fetch the new image under "
-                f"{s.album_root} over FTP {self.cfg.console.host}:{self.cfg.console.ftp_port}"
+                f"{root} over FTP {self.cfg.console.host}:{self.cfg.console.ftp_port}"
                 + (", delete it" if s.delete_after else ""))
 
     # --- the sequence ------------------------------------------------------
@@ -240,6 +254,9 @@ class Launcher:
                              "silent: deaf slot; HOME suspends it, X/A close it")
                 if r.label == "dialog":
                     self._click("A", L.settle_dialog_s)
+                elif r.label == "update-prompt":
+                    # A would press Download (the cursor starts there); B cancels
+                    self._click("B", L.settle_dialog_s)
                 else:
                     self._click("HOME", L.settle_home_s)
             if not self.blind:
@@ -273,8 +290,23 @@ class Launcher:
         self._click("A", L.settle_a_s)
         r = self.shot("after-a")
         if self.blind:
-            self._click("A", L.settle_a_s)    # profile picker, if any
-        elif r.label == "user-select":
+            if L.blind_second_a:
+                self.log("blind: A once more for a profile picker (launch.blind_second_a)")
+                self._click("A", L.settle_a_s)
+            else:
+                self.log("blind: no second A (an update prompt would take it as Download; "
+                         "set launch.blind_second_a = true for a profile picker)")
+            return
+        if r.label == "update-prompt":
+            self.log("update prompt: the cursor is on Download; DUP to 'Start Software', then A")
+            self._click("DUP", L.settle_dpad_s)
+            self._click("A", L.settle_a_s)
+            r = self.shot("after-update-prompt")
+            if r.label == "update-prompt":
+                self._click("B", L.settle_dialog_s)
+                raise LaunchFailure(LAUNCH_FAILED, "the update prompt is still up after DUP, A; "
+                                    "cancelled it with B")
+        if r.label == "user-select":
             self._click("A", L.settle_a_s)
             self.shot("after-user-select")
         elif r.label == "dialog":
@@ -290,10 +322,12 @@ class Launcher:
         if r.label == "home":
             self.log("no suspended application")
             return
-        if r.label != "close-prompt":
+        if r.label != "close-prompt" or not r.confident:
+            # never A here: on an update prompt (or any misread dialog) A is
+            # not "Close" -- B backs out of every HOME-menu dialog
             self._click("B", L.settle_dialog_s)
             raise LaunchFailure(LAUNCH_FAILED, f"X on the HOME menu showed {r.label}, "
-                                f"not close-prompt or HOME ({r.summary()})")
+                                f"not close-prompt or HOME; pressed B, not A ({r.summary()})")
         self.log("an application is suspended while the rig is silent (deaf slot or hbmenu): closing it")
         self._click("A", L.settle_close_s)
         r = self.shot("after-close")

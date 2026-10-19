@@ -85,6 +85,66 @@ class ClassifierTests(unittest.TestCase):
         full.learn("home", base)
         self.assertEqual(full.classify(clock).label, "unknown")
 
+    def _dialogs(self, **kw):
+        """Two references 'dialog types' sharing one layout, ~6 apart, like the
+        HOME menu's close and update prompts on hardware (5.2-6.0)."""
+        c = self.clf(grid=(4, 3), crop=(0.0, 0.0, 1.0, 1.0), **kw)
+        c.learn("close-prompt", jpeg((60, 60, 60)))
+        c.learn("update-prompt", jpeg((60, 60, 70)))
+        c.learn("home", jpeg((200, 200, 200)))
+        return c
+
+    def test_clear_winner_among_similar_dialogs(self):
+        r = self._dialogs().classify(jpeg((60, 60, 61)))
+        self.assertEqual(r.label, "close-prompt")
+        self.assertFalse(r.ambiguous)
+        self.assertTrue(r.confident)
+
+    def test_ambiguous_between_labels_is_unknown(self):
+        c = self._dialogs()
+        # halfway between the two prompts: both within the threshold
+        r = c.classify(jpeg((60, 60, 65)))
+        self.assertEqual(r.label, "unknown")
+        self.assertTrue(r.ambiguous)
+        self.assertFalse(r.confident)
+        self.assertIn(r.ref, ("close-prompt", "update-prompt"))   # still reported
+        self.assertRegex(r.summary(), r"ambiguous between (close|update)-prompt and (update|close)-prompt")
+
+    def test_ambiguity_rule_boundary(self):
+        # nearest d, rival e: ambiguous iff e < factor*d + offset
+        c = self._dialogs(ambiguity_factor=2.0, ambiguity_offset=3.0)
+        r = c.classify(jpeg((60, 60, 63)))
+        d, e = r.ranking[0][1], r.ranking[1][1]
+        self.assertEqual(r.ambiguous, e < 2 * d + 3, (d, e))
+        off = self._dialogs(ambiguity_factor=0.0, ambiguity_offset=0.0)
+        self.assertFalse(off.classify(jpeg((60, 60, 65))).ambiguous)   # 0, 0 disables the rule
+
+    def test_hardware_distances(self):
+        # the rule on the distances measured on the rig's console (2026-10-19)
+        def amb(d, e, f=2.0, o=3.0):
+            return e < f * d + o
+        self.assertFalse(amb(0.8, 5.2))     # update-prompt vs close-prompt
+        self.assertFalse(amb(0.6, 6.0))     # close-prompt vs update-prompt
+        self.assertFalse(amb(1.4, 17.2))    # error dialog vs close-prompt
+        self.assertFalse(amb(2.0, 46.1))    # home vs user-select
+        self.assertTrue(amb(7.9, 9.0))      # an unrecorded OK dialog: update 7.9 / close 9.0
+        # the original misread: the update prompt with no update-prompt
+        # reference (close-prompt 5.2, dialog 19.1) is NOT caught -- the rule
+        # needs the rival recorded, which is why update-prompt is a label
+        self.assertFalse(amb(5.2, 19.1))
+
+    def test_same_label_references_are_not_rivals(self):
+        c = self.clf(grid=(4, 3), crop=(0.0, 0.0, 1.0, 1.0))
+        c.learn("home", jpeg((60, 60, 60)))
+        c.learn("home-2", jpeg((60, 60, 64)))
+        c.learn("dialog", jpeg((200, 30, 30)))
+        r = c.classify(jpeg((60, 60, 62)))
+        self.assertEqual(r.label, "home")
+        self.assertFalse(r.ambiguous)
+
+    def test_update_prompt_is_a_label(self):
+        self.assertEqual(label_of("update-prompt-2"), "update-prompt")
+
     def test_bad_names_and_images(self):
         c = self.clf()
         with self.assertRaises(ValueError):

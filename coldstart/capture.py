@@ -15,9 +15,16 @@ start with the console's own timestamp, are compared. The capture is the
 file that was not there before CAPTURE was pressed (if several appeared, the
 lexicographically newest); no new file means the capture was refused or
 failed, never "re-read the previous image".
+
+The album's location: with emuMMC the console's Nintendo folder is
+redirected (e.g. /emuMMC/RAW1/Nintendo/Album). ``album_root = "auto"`` (the
+default) reads /emummc/emummc.ini over the same FTP on first use: emuMMC
+enabled (``enabled`` nonzero) with a ``nintendo_path`` -> that path's Album,
+otherwise /Nintendo/Album. The result is cached and logged once per process.
 """
 from __future__ import annotations
 
+import configparser
 import ftplib
 import io
 import time
@@ -36,17 +43,101 @@ def _join(parent: str, name: str) -> str:
     return parent.rstrip("/") + "/" + name
 
 
+def _parent(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[0] or "/"
+
+
 def _base(path: str) -> str:
     return path.rstrip("/").rsplit("/", 1)[-1]
+
+
+AUTO = "auto"
+DEFAULT_ROOT = "/Nintendo/Album"
+EMUMMC_INI = "/emummc/emummc.ini"
+
+# (host, port) -> (root, how): the auto-resolved album root, once per process
+_resolved: dict[tuple[str, int], tuple[str, str]] = {}
+# far-future album names already reported as sorting after a new capture
+_clock_noted: set[str] = set()
+
+
+def album_root_from_ini(text: str | None) -> tuple[str, str]:
+    """(album root, explanation) from the contents of emummc.ini (None: no file)."""
+    if text is None:
+        return DEFAULT_ROOT, f"no {EMUMMC_INI}: sysMMC"
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    try:
+        cp.read_string(text)
+    except configparser.Error as e:
+        return DEFAULT_ROOT, f"{EMUMMC_INI} unreadable ({str(e).splitlines()[0]}): assuming sysMMC"
+    if not cp.has_section("emummc"):
+        return DEFAULT_ROOT, f"{EMUMMC_INI} has no [emummc] section: sysMMC"
+    sec = cp["emummc"]
+    raw = sec.get("enabled", "0").strip().strip('"')
+    try:
+        enabled = int(raw, 0) != 0
+    except ValueError:
+        enabled = False
+    if not enabled:
+        return DEFAULT_ROOT, f"emuMMC disabled in {EMUMMC_INI} (enabled={raw}): sysMMC"
+    npath = sec.get("nintendo_path", "").strip().strip('"').strip("/")
+    if not npath:
+        return DEFAULT_ROOT, f"emuMMC enabled but {EMUMMC_INI} has no nintendo_path"
+    return "/" + npath + "/Album", f"emuMMC enabled, nintendo_path={npath} in {EMUMMC_INI}"
 
 
 class FtpAlbum:
     """The album on the SD card through sys-ftpd (anonymous FTP)."""
 
-    def __init__(self, host: str, port: int, root: str = "/Nintendo/Album", timeout: float = 10.0,
-                 ftp_factory=ftplib.FTP):
-        self.host, self.port, self.root, self.timeout = host, port, root, timeout
+    def __init__(self, host: str, port: int, root: str = AUTO, timeout: float = 10.0,
+                 ftp_factory=ftplib.FTP, log=None):
+        self.host, self.port, self.timeout = host, port, timeout
+        self.configured = root
         self.ftp_factory = ftp_factory
+        self.log = log or (lambda m: None)
+        self.how = "configured" if root != AUTO else ""
+
+    @property
+    def root(self) -> str | None:
+        """The album root, or None while "auto" is not resolved yet."""
+        if self.configured != AUTO:
+            return self.configured
+        hit = _resolved.get((self.host, self.port))
+        if hit is not None:
+            self.how = hit[1]
+        return hit[0] if hit else None
+
+    def resolve(self, ftp=None) -> str:
+        """Resolve "auto" (reading emummc.ini on ``ftp`` or a new connection)."""
+        root = self.root
+        if root is not None:
+            return root
+        own = ftp is None
+        if own:
+            ftp = self._open()
+        try:
+            buf = io.BytesIO()
+            try:
+                ftp.retrbinary(f"RETR {EMUMMC_INI}", buf.write)
+                text = buf.getvalue().decode("utf-8", "replace")
+            except (ftplib.error_perm, ftplib.error_temp) as e:
+                # 550 (or sys-ftpd's 450) for a missing file. Only conclude
+                # "no emuMMC" if the directory listing agrees; otherwise do
+                # not cache a guess for the whole process.
+                listed = {_base(n) for n in self._nlst(ftp, _parent(EMUMMC_INI))}
+                if _base(EMUMMC_INI) in listed:
+                    raise CaptureUnavailable(f"FTP read of {EMUMMC_INI} failed: {e}") from None
+                text = None
+            root, how = album_root_from_ini(text)
+        except (OSError, EOFError, ftplib.Error) as e:
+            raise CaptureUnavailable(f"FTP read of {EMUMMC_INI} failed: {e}") from None
+        finally:
+            if own:
+                _quit(ftp)
+        _resolved[(self.host, self.port)] = (root, how)
+        self.how = how
+        self.log(f"album root {root} ({how})")
+        return root
 
     def _open(self):
         try:
@@ -67,7 +158,7 @@ class FtpAlbum:
 
     def _walk(self, ftp) -> set[str]:
         files = set()
-        for y in self._nlst(ftp, self.root):
+        for y in self._nlst(ftp, self.resolve(ftp)):
             if not (_base(y).isdigit() and len(_base(y)) == 4):
                 continue
             for m in self._nlst(ftp, y):
@@ -84,7 +175,7 @@ class FtpAlbum:
         try:
             return self._walk(ftp)
         except (OSError, EOFError, ftplib.Error) as e:
-            raise CaptureUnavailable(f"FTP listing of {self.root} failed: {e}") from None
+            raise CaptureUnavailable(f"FTP listing of {self.root or 'the album'} failed: {e}") from None
         finally:
             _quit(ftp)
 
@@ -143,7 +234,8 @@ class AlbumSource:
         if len(new) > 1:
             self.log(f"capture: {len(new)} new album files; taking the newest name {_base(path)}")
         overall = newest(before | new)
-        if overall != path:
+        if overall != path and overall not in _clock_noted:
+            _clock_noted.add(overall)   # once per process: it stays there until deleted
             self.log(f"capture: note {_base(overall)} sorts after the new image (console clock jumped)")
         return self.album.fetch(path, self.delete), path
 
@@ -162,5 +254,5 @@ def from_config(cfg, log=None):
     s = cfg.screenshot
     if s.source == "pixelpeek":
         return PixelPeekSource()
-    album = FtpAlbum(cfg.console.host, cfg.console.ftp_port, s.album_root, s.ftp_timeout_s)
+    album = FtpAlbum(cfg.console.host, cfg.console.ftp_port, s.album_root, s.ftp_timeout_s, log=log)
     return AlbumSource(album, s.capture_wait_s, s.capture_timeout_s, s.delete_after, log=log)

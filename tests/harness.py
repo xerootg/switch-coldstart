@@ -112,7 +112,8 @@ class Sim:
         return self.ctl(cmd="set", values=values)
 
     def album(self) -> list[Path]:
-        return sorted((self.sd / "Nintendo" / "Album").rglob("*.jpg"))
+        # /Nintendo/Album, or /emuMMC/RAW1/Nintendo/Album with --emummc
+        return sorted(p for p in self.sd.rglob("*.jpg") if "Album" in p.parts)
 
     def twib_calls(self) -> list[str]:
         p = self.tmp / "twib.log"
@@ -194,7 +195,8 @@ def shared_refs() -> Path:
     _REFS = Path(tempfile.mkdtemp(prefix="coldstart-refs-"))
     atexit.register(shutil.rmtree, _REFS, True)
     with Sim(refs_dir=_REFS) as sim:
-        for screen in ("home", "dialog", "user-select", "game", "waiter", "close-prompt"):
+        for screen in ("home", "dialog", "user-select", "game", "waiter", "close-prompt",
+                       "update-prompt"):
             sim.set(screen=screen, cursor=0)
             r = sim.run("learn", screen)
             if r.returncode != 0:

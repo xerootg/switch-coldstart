@@ -27,6 +27,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(c.notify.webhook, "")
         self.assertIsNone(c.source)
 
+    def test_album_root_auto_or_absolute(self):
+        self.assertEqual(config.load(None, env={}).screenshot.album_root, "auto")
+        self.assertFalse(config.load(None, env={}).launch.blind_second_a)
+        p = self.write('[screenshot]\nalbum_root = "/emuMMC/RAW1/Nintendo/Album"\n')
+        self.assertEqual(config.load(p, env={}).screenshot.album_root, "/emuMMC/RAW1/Nintendo/Album")
+        with self.assertRaisesRegex(config.ConfigError, "album_root"):
+            config.load(self.write('[screenshot]\nalbum_root = "Nintendo/Album"\n'), env={})
+        with self.assertRaisesRegex(config.ConfigError, "ambiguity"):
+            config.load(self.write('[classify]\nambiguity_factor = -1\n'), env={})
+
     def test_file_overrides_and_int_to_float(self):
         p = self.write('[launch]\ntile = 2\nwait_rig_s = 30\n[classify]\ngrid = [8, 4]\n')
         c = config.load(p, env={})

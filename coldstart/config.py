@@ -48,7 +48,9 @@ DEFAULTS: dict[str, dict] = {
         "source": "album",
         "capture_wait_s": 2.5,
         "capture_timeout_s": 8.0,
-        "album_root": "/Nintendo/Album",
+        # "auto": read /emummc/emummc.ini over FTP; emuMMC enabled with a
+        # nintendo_path -> /<nintendo_path>/Album, else /Nintendo/Album.
+        "album_root": "auto",
         "delete_after": True,
         "ftp_timeout_s": 10.0,
     },
@@ -80,6 +82,11 @@ DEFAULTS: dict[str, dict] = {
         # after A on the HOME menu's "Close software" prompt
         "settle_close_s": 4.0,
         "max_normalize_steps": 5,
+        # Blind mode (no screenshots): press A a second time after the tile's
+        # A, for a profile picker. Off by default: if HOME shows "A new update
+        # is available" the cursor starts on Download, and a blind A
+        # downloads the update (error 2123-0011 on the rig's console).
+        "blind_second_a": False,
         "wait_rig_s": 120.0,
         "rig_poll_s": 2.0,
     },
@@ -91,6 +98,11 @@ DEFAULTS: dict[str, dict] = {
         "crop": [0.0, 0.12, 1.0, 1.0],
         # Mean per-cell RGB distance (0..441) above which a screen is unknown.
         "threshold": 40.0,
+        # Ambiguity: the nearest label only counts if every other label's
+        # nearest reference is at least factor x nearest + offset away
+        # (HOME-menu dialogs share a layout; see classify.py). 0, 0 = off.
+        "ambiguity_factor": 2.0,
+        "ambiguity_offset": 3.0,
     },
     "supervise": {
         "poll_s": 5.0,
@@ -222,6 +234,11 @@ def _validate(data: dict) -> None:
     c = data["classify"]["crop"]
     if len(c) != 4 or not (0.0 <= c[0] < c[2] <= 1.0 and 0.0 <= c[1] < c[3] <= 1.0):
         raise ConfigError("classify.crop: expected [x0, y0, x1, y1] fractions with x0<x1, y0<y1")
+    ar = data["screenshot"]["album_root"]
+    if ar != "auto" and not ar.startswith("/"):
+        raise ConfigError('screenshot.album_root: "auto" or an absolute path like "/Nintendo/Album"')
+    if data["classify"]["ambiguity_factor"] < 0 or data["classify"]["ambiguity_offset"] < 0:
+        raise ConfigError("classify.ambiguity_factor/ambiguity_offset: must be >= 0")
     if data["screenshot"]["source"] not in ("album", "pixelpeek"):
         raise ConfigError('screenshot.source: "album" or "pixelpeek"')
     if data["launch"]["tile"] < 0:

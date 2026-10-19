@@ -45,6 +45,53 @@ class SimRules(unittest.TestCase):
         self.assertEqual(sim.state()["screen"], "home")
         self.assertIsNotNone(sim.state()["app"])   # suspended, not gone
 
+    def test_update_prompt(self):
+        sim = self.sim("--update-prompt", "--user-select")
+        b = self.bb(sim)
+        b.click("A")
+        b.get_version()
+        st = sim.state()
+        self.assertEqual((st["screen"], st["update_cursor"]), ("update-prompt", "download"))
+        b.click("HOME")                           # a HOME-menu dialog ignores HOME
+        b.click("DLEFT")
+        b.get_version()
+        self.assertEqual(sim.state()["update_cursor"], "cancel")
+        b.click("A")                              # Cancel
+        b.get_version()
+        self.assertEqual(sim.state()["screen"], "home")
+        b.click("A")
+        b.click("DUP")
+        b.click("A")                              # Start Software -> profile picker
+        b.get_version()
+        self.assertEqual(sim.state()["screen"], "user-select")
+        b.click("A")
+        b.get_version()
+        self.assertEqual(sim.state()["screen"], "game")
+        self.assertIn("update-prompt start", sim.state()["events"])
+
+    def test_update_prompt_a_alone_downloads(self):
+        sim = self.sim("--update-prompt")
+        b = self.bb(sim)
+        b.click("A")
+        b.click("A")
+        b.get_version()
+        st = sim.state()
+        self.assertEqual(st["screen"], "dialog")
+        self.assertIn("update-prompt download", st["events"])
+        self.assertIsNone(st["app"])
+
+    def test_emummc_album(self):
+        sim = self.sim("--emummc")
+        self.assertIn("nintendo_path=emuMMC/RAW1/Nintendo",
+                      (sim.sd / "emummc" / "emummc.ini").read_text())
+        b = self.bb(sim)
+        b.click("CAPTURE")
+        b.get_version()
+        time.sleep(0.5)
+        album = sim.album()
+        self.assertEqual(len(album), 1)
+        self.assertEqual(album[0].relative_to(sim.sd).parts[:4], ("emuMMC", "RAW1", "Nintendo", "Album"))
+
     def test_close_prompt(self):
         sim = self.sim("--screen", "game")
         pid = sim.state()["app"]["pid"]
