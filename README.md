@@ -289,3 +289,17 @@ PATH=$PWD/sim/bin:$PATH COLDSTART_SIM_CTL=127.0.0.1:16099 COLDSTART_HOST=127.0.0
 
 DESIGN.md describes the state machine, the failure handling and the
 decisions behind them.
+
+## License
+
+switch-coldstart is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. See `LICENSE`.
+
+`reference/sys-botbase-src/` and `reference/sys-botbase-2.5/` are copied from
+[olliz0r/sys-botbase](https://github.com/olliz0r/sys-botbase) and remain under
+that project's GPL-3.0 license. The binary in `reference/sys-botbase-2.5/` is
+the unmodified v2.5 release; its complete source is the v2.5 tag of that
+repository, and `make sysmodule` builds from the revision pinned in
+`scripts/build-sysmodule.sh`.
