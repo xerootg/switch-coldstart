@@ -251,10 +251,16 @@ From the first run against the real console (firmware 20.2.0, Atmosphère
   pressed).
 - **Cold launch time:** the first cold launch took 73 s from the tile's A
   until the rig's waiter answered; `launch.wait_rig_s` (120 s) covers it.
-- **Error 2123-0011** ("restart the console"): A on the tile showed "A new
-  update is available. It will be downloaded now." (Start Software above
-  Cancel and Download, cursor on Download); the A that followed pressed
-  Download and the download failed. The tool now recognises
+- **Error 2123-0011** ("restart the console"): seen twice, both times when
+  the tile was started right after closing an application that was hung
+  (13:09 on 2026-10-19, 00:47 on 2026-10-20); the closed process was
+  evidently still terminating. Nothing needs restarting: OK on the dialog and
+  a second launch a minute later worked both times, which is what the
+  supervisor's next attempt does. (This note first blamed the update
+  prompt below; that was wrong.)
+- **Update prompt:** A on the tile can show "A new update is available. It
+  will be downloaded now." (Start Software above Cancel and Download, cursor
+  on Download), and A there starts a download. The tool recognises
   `update-prompt` and goes DUP, A; blind mode no longer sends a second A.
   The prompt classified as `close-prompt` at 5.2 before it had its own
   reference, hence the ambiguity rule.
